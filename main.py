@@ -1,6 +1,8 @@
 """
-Telegram бот для ... с использованием OpenAI API.
-Бот помогает сделать ...
+Vibe Checker - персональный помощник по делам и продуктивности.
+Телеграм-бот для планирования задач, отслеживания выполнения и повышения продуктивности.
+
+Использует OpenAI API для понимания естественной речи и поддерживает голосовые сообщения.
 
 Usage:
     python main.py
@@ -15,7 +17,7 @@ from aiogram.types import Message
 from aiogram import F
 
 from config import TELEGRAM_BOT_TOKEN, logger
-from openai_module import get_recipe_response
+from openai_module import get_vibe_checker_response
 from storage import storage
 from prompts import WELCOME_MESSAGE, HELP_MESSAGE
 from audio_handler import transcribe_voice
@@ -101,8 +103,8 @@ async def handle_message(message: Message) -> None:
     message_history = storage.get_message_history(user_id)
     
     try:
-        # Получаем ответ от OpenAI
-        response_text = await get_recipe_response(message_history)
+        # Получаем ответ от Vibe Checker
+        response_text = await get_vibe_checker_response(message_history)
         
         # Отправляем ответ без добавления упоминания пользователя
         await message.answer(response_text, parse_mode="Markdown")
@@ -156,8 +158,8 @@ async def handle_voice_message(message: Message) -> None:
         # Получаем историю сообщений пользователя
         message_history = storage.get_message_history(user_id)
         
-        # Получаем ответ от OpenAI
-        response_text = await get_recipe_response(message_history)
+        # Получаем ответ от Vibe Checker
+        response_text = await get_vibe_checker_response(message_history)
         
         # Отправляем ответ пользователю
         await message.answer(response_text, parse_mode="Markdown")

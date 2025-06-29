@@ -1,4 +1,5 @@
 aiogram==3.19.0
 openai==1.66.3
 python-dotenv==1.0.0
-aiofiles==23.2.1 
+aiofiles==23.2.1
+pytz==2025.2 
