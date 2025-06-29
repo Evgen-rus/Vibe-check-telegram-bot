@@ -69,11 +69,6 @@ class Storage:
             # Создаем новую запись для пользователя
             self.users_data[user_id_str] = {
                 "messages": [],
-                "preferences": {
-                    "diet_restrictions": [],
-                    "favorite_cuisine": [],
-                    "disliked_ingredients": []
-                },
                 "last_interaction": time.time()
             }
             self._save_data()
@@ -115,24 +110,7 @@ class Storage:
         # Возвращаем последние max_messages сообщений
         return user_data["messages"][-max_messages:]
     
-    def update_user_preferences(self, user_id: int, preference_type: str, values: List[str]) -> None:
-        """
-        Обновляет предпочтения пользователя.
-        
-        Args:
-            user_id: ID пользователя в Telegram
-            preference_type: Тип предпочтения ('diet_restrictions', 'favorite_cuisine', 'disliked_ingredients')
-            values: Список значений для добавления
-        """
-        user_data = self.get_user_data(user_id)
-        
-        if preference_type in user_data["preferences"]:
-            # Добавляем новые значения, избегая дубликатов
-            current_values = set(user_data["preferences"][preference_type])
-            current_values.update(values)
-            user_data["preferences"][preference_type] = list(current_values)
-            self._save_data()
-    
+
     def clear_history(self, user_id: int) -> None:
         """
         Очищает историю сообщений пользователя.
@@ -143,30 +121,7 @@ class Storage:
         user_data = self.get_user_data(user_id)
         user_data["messages"] = []
         self._save_data()
-    
-    def cleanup_old_data(self, days: int = 30) -> None:
-        """
-        Удаляет данные пользователей, не активных в течение указанного количества дней.
         
-        Args:
-            days: Количество дней неактивности для удаления данных
-        """
-        current_time = time.time()
-        inactive_period = days * 86400  # Секунд в дне
-        
-        users_to_remove = []
-        
-        for user_id, user_data in self.users_data.items():
-            last_interaction = user_data.get("last_interaction", 0)
-            if current_time - last_interaction > inactive_period:
-                users_to_remove.append(user_id)
-        
-        for user_id in users_to_remove:
-            del self.users_data[user_id]
-            
-        if users_to_remove:
-            logger.info(f"Очищены данные {len(users_to_remove)} неактивных пользователей")
-            self._save_data()
 
 # Создаем экземпляр хранилища
 storage = Storage() 
