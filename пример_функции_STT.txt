@@ -1,0 +1,197 @@
+# Необходимые зависимости для STT (Speech-to-Text) с использованием OpenAI gpt-4o-mini-transcribe API
+# =====================================================================================
+# pip install openai==1.77.0      # Основная библиотека для работы с OpenAI API
+# pip install python-dotenv==1.1.0 # Для загрузки переменных окружения из .env файла
+# pip install aiofiles==23.2.1     # Для асинхронной работы с файлами
+# pip install pydub==0.25.1        # Для обработки аудиофайлов (конвертация, нормализация)
+# pip install ffmpeg-python==0.2.0 # Для работы с медиафайлами (необходим ffmpeg)
+# pip install scipy==1.15.2        # Для обработки аудиосигналов
+# =====================================================================================
+
+# Примечание: Также требуется установить ffmpeg в системе:
+# - Linux: `apt-get install ffmpeg` или эквивалент для вашего дистрибутива
+
+# Настройка окружения OpenAI API
+# -------------------------------------------------------------------------
+# В файле .env должны быть следующие переменные:
+# OPENAI_API_KEY=ваш_ключ_api   # Обязательный параметр
+# OPENAI_MODEL_SST=gpt-4o-mini-transcribe   # модель для распознавания
+# -------------------------------------------------------------------------
+
+# Пример инициализации клиента OpenAI перед использованием функции:
+# 
+# import os
+# import openai
+# import dotenv
+# 
+# # Загрузка переменных окружения
+# dotenv.load_dotenv()
+# 
+# # Получение API ключа
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# SST_MODEL = os.getenv("OPENAI_MODEL_SST", "whisper-1")  # Используем модель из .env или whisper-1 по умолчанию
+# 
+# # Инициализация асинхронного клиента OpenAI
+# client = openai.AsyncOpenAI()
+
+async def transcribe_audio(audio_file, language="ru"):
+    """
+    Асинхронная функция для распознавания речи из аудиофайла с использованием OpenAI Whisper API.
+    
+    Функция пытается использовать модель, указанную в переменной окружения OPENAI_MODEL_SST.
+    Если эта модель недоступна или вызывает ошибку, функция автоматически 
+    переключается на стандартную модель "whisper-1".
+    
+    Параметры:
+    ----------
+    audio_file : str
+        Путь к аудиофайлу для распознавания. 
+        Поддерживаемые форматы: mp3, mp4, mpeg, mpga, m4a, wav, webm.
+        Максимальный размер файла: 25 MB.
+        
+    language : str, опционально (по умолчанию "ru")
+        Код языка для распознавания (ISO 639-1).
+        Примеры: "ru" (русский), "en" (английский), "fr" (французский).
+        Указание правильного языка повышает точность распознавания.
+        
+    Возвращает:
+    -----------
+    str
+        Распознанный текст из аудиофайла.
+        Пустая строка в случае ошибки.
+        
+    Исключения:
+    -----------
+    Функция обрабатывает все исключения внутри себя и выводит сообщения об ошибках.
+    В случае ошибки возвращается пустая строка.
+    
+    Примечания:
+    -----------
+    - Для корректной работы требуется доступный API-ключ OpenAI в переменных окружения.
+    - Качество распознавания зависит от качества аудиозаписи.
+    - Для лучших результатов рекомендуется использовать аудио с частотой дискретизации 16 кГц.
+    """
+    # Начинаем процесс распознавания
+    print(f"\nНачало распознавания аудиофайла: {audio_file}")
+    print(f"Используемый язык: {language}")
+        
+    try:
+        # Проверяем существование файла перед обработкой
+        if not os.path.exists(audio_file):
+            print(f"Ошибка: Файл {audio_file} не найден")
+            return ""
+            
+        # Открываем аудиофайл в бинарном режиме для передачи в API
+        with open(audio_file, "rb") as file:
+            try:
+                # Первая попытка: используем модель из переменной окружения
+                print(f"Попытка распознавания с моделью: {SST_MODEL}")
+                
+                # Вызываем API OpenAI для транскрипции
+                transcript = await client.audio.transcriptions.create(
+                    model=SST_MODEL,       # Модель из .env или переданная в функцию
+                    file=file,             # Файловый объект
+                    language=language      # Язык аудио
+                )
+                
+                # Получаем текст из ответа API
+                result_text = transcript.text
+                print(f"Распознавание успешно завершено с моделью {SST_MODEL}")
+                return result_text
+                
+            except Exception as e:
+                # Обрабатываем ошибку "invalid model ID"
+                if "invalid model ID" in str(e):
+                    # Логируем информацию о переключении на стандартную модель
+                    print(f"Модель {SST_MODEL} не распознана. Используем whisper-1.")
+                    
+                    # Открываем файл заново, так как предыдущий файловый объект уже был прочитан
+                    with open(audio_file, "rb") as file_retry:
+                        # Вторая попытка: используем стандартную модель whisper-1
+                        transcript = await client.audio.transcriptions.create(
+                            model="whisper-1",  # Стандартная модель, которая всегда доступна
+                            file=file_retry,    # Новый файловый объект
+                            language=language   # Тот же язык
+                        )
+                        
+                    # Получаем текст из ответа API
+                    result_text = transcript.text
+                    print(f"Распознавание успешно завершено с моделью whisper-1")
+                    return result_text
+                else:
+                    # Если ошибка не связана с ID модели, пробрасываем её дальше
+                    raise
+    except Exception as e:
+        # Обрабатываем все остальные исключения
+        print(f"Ошибка при распознавании речи: {e}")
+        return ""
+
+
+# Доступные модели OpenAI для распознавания речи (STT):
+# -----------------------------------------------------
+# 1. whisper-1     - запасная модель, всегда доступна
+# 2. gpt-4o-mini-transcribe - Используем эту модель, в 2 раза дешевле, может быть недоступна
+#
+# Для TTS (преобразования текста в речь) доступны:
+# OPENAI_MODEL_TTS=gpt-4o-mini-tts - Модель для генерации речи
+#
+# Для обычных запросов:
+# OPENAI_MODEL=gpt-4.1-mini - Модель для генерации текста
+# -----------------------------------------------------
+
+# Примеры использования функции:
+# =============================================================================
+# Пример 1: Базовое использование для распознавания русской речи
+# 
+# import asyncio
+# 
+# async def main():
+#     text = await transcribe_audio("audio.mp3")
+#     print(f"Распознанный текст: {text}")
+# 
+# if __name__ == "__main__":
+#     asyncio.run(main())
+# 
+# 
+# Пример 2: Распознавание с указанием языка и обработкой результата
+# 
+# async def process_audio_files(file_list):
+#     results = {}
+#     for file in file_list:
+#         language = "en" if "english" in file else "ru"
+#         text = await transcribe_audio(file, language=language)
+#         if text:
+#             results[file] = text
+#         else:
+#             print(f"Не удалось распознать файл {file}")
+#     return results
+# 
+# 
+# Пример 3: Предварительная обработка аудио для лучшего распознавания
+# 
+# from pydub import AudioSegment
+# 
+# async def transcribe_with_preprocessing(audio_file):
+#     # Загружаем аудио
+#     audio = AudioSegment.from_file(audio_file)
+#     
+#     # Нормализуем громкость
+#     normalized_audio = audio.normalize()
+#     
+#     # Удаляем тишину
+#     chunks = split_on_silence(normalized_audio, 
+#                               min_silence_len=500, 
+#                               silence_thresh=-40)
+#     
+#     # Объединяем обработанные фрагменты
+#     processed_audio = AudioSegment.empty()
+#     for chunk in chunks:
+#         processed_audio += chunk
+#     
+#     # Сохраняем обработанное аудио
+#     processed_file = "processed_" + os.path.basename(audio_file)
+#     processed_audio.export(processed_file, format="wav")
+#     
+#     # Распознаем обработанное аудио
+#     return await transcribe_audio(processed_file)
+# =============================================================================
