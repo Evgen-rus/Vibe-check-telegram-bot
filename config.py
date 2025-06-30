@@ -8,13 +8,13 @@ load_dotenv()
 # Получение токенов и настроек из переменных окружения
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano")
+OPENAI_MODEL = "gpt-4.1-mini"
 # Модель для транскрибации голосовых сообщений
-TRANSCRIPTION_MODEL = os.getenv("TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")
+TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 
 # Настройки логирования
-LOGGING_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-ENABLE_DIALOG_LOGGING = os.getenv("ENABLE_DIALOG_LOGGING", "true").lower() == "true"
+LOGGING_LEVEL = "INFO"
+ENABLE_DIALOG_LOGGING = True
 
 # Настройка логгера
 logging.basicConfig(
@@ -25,6 +25,6 @@ logger = logging.getLogger(__name__)
 
 # Параметры запросов к OpenAI
 OPENAI_PARAMS = {
-    "temperature": 0.8,
+    "temperature": 0.7,
     "max_tokens": 1000,
 } 
