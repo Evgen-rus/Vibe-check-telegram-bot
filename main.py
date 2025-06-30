@@ -16,7 +16,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram import F
 
-from config import TELEGRAM_BOT_TOKEN, logger
+from config import TELEGRAM_BOT_TOKEN, logger, ALLOWED_USERS
 from openai_module import get_vibe_checker_response
 from storage import storage
 from prompts import WELCOME_MESSAGE, HELP_MESSAGE
@@ -25,6 +25,19 @@ from audio_handler import transcribe_voice
 # Инициализация бота и диспетчера
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
+
+
+def is_user_allowed(user_id: int) -> bool:
+    """
+    Проверяет, разрешен ли пользователю доступ к боту.
+    
+    Args:
+        user_id: ID пользователя в Telegram
+        
+    Returns:
+        True если пользователь разрешен, False если нет
+    """
+    return user_id in ALLOWED_USERS
 
 
 @dp.message(Command("start"))
@@ -36,6 +49,12 @@ async def cmd_start(message: Message) -> None:
     Args:
         message: Объект сообщения от пользователя
     """
+    # Проверка доступа пользователя
+    if not is_user_allowed(message.from_user.id):
+        await message.answer("🚫 У вас нет доступа к этому боту.")
+        logger.warning(f"Попытка доступа от неавторизованного пользователя: {message.from_user.id}")
+        return
+    
     user_id = message.from_user.id
     user_name = message.from_user.first_name
     
@@ -60,6 +79,12 @@ async def cmd_help(message: Message) -> None:
     Args:
         message: Объект сообщения от пользователя
     """
+    # Проверка доступа пользователя
+    if not is_user_allowed(message.from_user.id):
+        await message.answer("🚫 У вас нет доступа к этому боту.")
+        logger.warning(f"Попытка доступа от неавторизованного пользователя: {message.from_user.id}")
+        return
+    
     await message.answer(HELP_MESSAGE)
     storage.add_message(message.from_user.id, "assistant", HELP_MESSAGE)
 
@@ -73,6 +98,12 @@ async def cmd_clear(message: Message) -> None:
     Args:
         message: Объект сообщения от пользователя
     """
+    # Проверка доступа пользователя
+    if not is_user_allowed(message.from_user.id):
+        await message.answer("🚫 У вас нет доступа к этому боту.")
+        logger.warning(f"Попытка доступа от неавторизованного пользователя: {message.from_user.id}")
+        return
+    
     user_id = message.from_user.id
     storage.clear_history(user_id)
     await message.answer("История диалога очищена. Давай начнем заново!")
@@ -87,6 +118,12 @@ async def handle_message(message: Message) -> None:
     Args:
         message: Объект сообщения от пользователя
     """
+    # Проверка доступа пользователя
+    if not is_user_allowed(message.from_user.id):
+        await message.answer("🚫 У вас нет доступа к этому боту.")
+        logger.warning(f"Попытка доступа от неавторизованного пользователя: {message.from_user.id}")
+        return
+    
     user_id = message.from_user.id
     user_message = message.text
     
@@ -126,6 +163,12 @@ async def handle_voice_message(message: Message) -> None:
     Args:
         message: Объект сообщения от пользователя
     """
+    # Проверка доступа пользователя
+    if not is_user_allowed(message.from_user.id):
+        await message.answer("🚫 У вас нет доступа к этому боту.")
+        logger.warning(f"Попытка доступа от неавторизованного пользователя: {message.from_user.id}")
+        return
+    
     user_id = message.from_user.id
     chat_id = message.chat.id
     
