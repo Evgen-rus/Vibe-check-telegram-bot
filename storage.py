@@ -222,7 +222,7 @@ class Storage:
                 continue
         self._save_data()
     
-    def get_message_history(self, user_id: int, max_messages: int = 10) -> List[Dict[str, str]]:
+    def get_message_history(self, user_id: int, max_messages: int = 50) -> List[Dict[str, str]]:
         """
         Получает историю сообщений пользователя.
         
