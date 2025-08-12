@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
 import logging
+import pytz
 
 # Загрузка переменных окружения из файла .env
 load_dotenv()
@@ -8,13 +9,17 @@ load_dotenv()
 # Получение токенов и настроек из переменных окружения
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = "gpt-4.1-mini"
+OPENAI_MODEL = "gpt-4o-mini"
 # Модель для транскрибации голосовых сообщений
 TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 
 # Настройки логирования
 LOGGING_LEVEL = "INFO"
 ENABLE_DIALOG_LOGGING = True
+
+# Часовой пояс по умолчанию для напоминаний
+TIMEZONE = os.getenv("TIMEZONE", "Asia/Novosibirsk")
+LOCAL_TZ = pytz.timezone(TIMEZONE)
 
 # Настройка логгера
 logging.basicConfig(

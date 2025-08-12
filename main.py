@@ -16,11 +16,12 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram import F
 
-from config import TELEGRAM_BOT_TOKEN, logger, ALLOWED_USERS
+from config import TELEGRAM_BOT_TOKEN, logger, ALLOWED_USERS, LOCAL_TZ
 from openai_module import get_vibe_checker_response
 from storage import storage
 from prompts import WELCOME_MESSAGE, HELP_MESSAGE
 from audio_handler import transcribe_voice
+from datetime import datetime
 
 # Инициализация бота и диспетчера
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -68,6 +69,8 @@ async def cmd_start(message: Message) -> None:
     
     # Добавляем первое сообщение в историю
     storage.add_message(user_id, "assistant", welcome_text)
+    # Сохраняем chat_id для напоминаний
+    storage.set_chat_id(user_id, message.chat.id)
 
 
 @dp.message(Command("help"))
@@ -87,6 +90,7 @@ async def cmd_help(message: Message) -> None:
     
     await message.answer(HELP_MESSAGE)
     storage.add_message(message.from_user.id, "assistant", HELP_MESSAGE)
+    storage.set_chat_id(message.from_user.id, message.chat.id)
 
 
 @dp.message(Command("clear"))
@@ -107,6 +111,80 @@ async def cmd_clear(message: Message) -> None:
     user_id = message.from_user.id
     storage.clear_history(user_id)
     await message.answer("История диалога очищена. Давай начнем заново!")
+    storage.set_chat_id(user_id, message.chat.id)
+
+
+@dp.message(Command("remind"))
+async def cmd_remind(message: Message) -> None:
+    """
+    Добавляет напоминание: /remind HH:MM текст
+    """
+    if not is_user_allowed(message.from_user.id):
+        await message.answer("🚫 У вас нет доступа к этому боту.")
+        logger.warning(f"Попытка доступа от неавторизованного пользователя: {message.from_user.id}")
+        return
+
+    user_id = message.from_user.id
+    storage.set_chat_id(user_id, message.chat.id)
+
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer("Формат: /remind HH:MM текст. Например: /remind 13:00 обед")
+        return
+    time_str = parts[1]
+    text = parts[2].strip()
+    try:
+        reminder = storage.add_reminder(user_id, time_str, text)
+        await message.answer(f"Напоминание добавлено: [{reminder['id']}] {reminder['time']} — {reminder['text']}")
+    except ValueError as e:
+        await message.answer(str(e))
+
+
+@dp.message(Command("reminders"))
+async def cmd_reminders(message: Message) -> None:
+    """
+    Показывает список напоминаний пользователя.
+    """
+    if not is_user_allowed(message.from_user.id):
+        await message.answer("🚫 У вас нет доступа к этому боту.")
+        logger.warning(f"Попытка доступа от неавторизованного пользователя: {message.from_user.id}")
+        return
+
+    user_id = message.from_user.id
+    storage.set_chat_id(user_id, message.chat.id)
+    reminders = storage.list_reminders(user_id)
+    if not reminders:
+        await message.answer("У вас пока нет напоминаний. Используйте /remind HH:MM текст")
+        return
+    lines = [f"[{r['id']}] {r['time']} — {r['text']}" for r in reminders]
+    await message.answer("Ваши напоминания:\n" + "\n".join(lines))
+
+
+@dp.message(Command("delremind"))
+async def cmd_delremind(message: Message) -> None:
+    """
+    Удаляет напоминание по ID: /delremind ID
+    """
+    if not is_user_allowed(message.from_user.id):
+        await message.answer("🚫 У вас нет доступа к этому боту.")
+        logger.warning(f"Попытка доступа от неавторизованного пользователя: {message.from_user.id}")
+        return
+
+    user_id = message.from_user.id
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Формат: /delremind ID")
+        return
+    try:
+        identifier = int(parts[1])
+    except ValueError:
+        await message.answer("ID должен быть числом")
+        return
+    ok = storage.delete_reminder(user_id, identifier)
+    if ok:
+        await message.answer("Напоминание удалено")
+    else:
+        await message.answer("Не нашёл напоминание с таким ID")
 
 
 @dp.message(F.text)
@@ -132,6 +210,7 @@ async def handle_message(message: Message) -> None:
     
     # Сохраняем сообщение пользователя
     storage.add_message(user_id, "user", user_message)
+    storage.set_chat_id(user_id, chat_id)
     
     # Индикатор печати
     await bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -194,6 +273,7 @@ async def handle_voice_message(message: Message) -> None:
         
         # Сохраняем текст сообщения в историю пользователя
         storage.add_message(user_id, "user", voice_text)
+        storage.set_chat_id(user_id, chat_id)
         
         # Индикатор печати
         await bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -221,8 +301,33 @@ async def main() -> None:
     """
     logger.info("Запуск бота...")
     
-    # Пропускаем накопившиеся обновления и запускаем поллинг
+    # Пропускаем накопившиеся обновления
     await bot.delete_webhook(drop_pending_updates=True)
+
+    # Запускаем фоновую задачу отправки напоминаний
+    async def reminders_loop():
+        while True:
+            try:
+                now_local = datetime.now(LOCAL_TZ)
+                hhmm = now_local.strftime("%H:%M")
+                today = now_local.strftime("%Y-%m-%d")
+                due = storage.get_due_reminders(hhmm, today)
+                for user_id_int, reminder in due:
+                    chat_id_saved = storage.get_chat_id(user_id_int)
+                    if chat_id_saved:
+                        try:
+                            await bot.send_message(chat_id_saved, f"⏰ Напоминание: {reminder['text']}")
+                            storage.mark_reminder_sent(user_id_int, int(reminder['id']), today)
+                        except Exception as send_err:
+                            logger.error(f"Не удалось отправить напоминание {reminder}: {send_err}")
+                await asyncio.sleep(30)
+            except Exception as loop_err:
+                logger.error(f"Ошибка в цикле напоминаний: {loop_err}")
+                await asyncio.sleep(30)
+
+    asyncio.create_task(reminders_loop())
+
+    # Старт поллинга
     await dp.start_polling(bot)
 
 
