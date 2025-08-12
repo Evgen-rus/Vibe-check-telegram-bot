@@ -1,17 +1,16 @@
 """
-Модуль для взаимодействия с OpenAI Responses API.
+Модуль для взаимодействия с OpenAI Responses API (асинхронно).
 """
 
 from typing import List, Dict, Optional
-import asyncio
 from datetime import datetime
 import pytz
-from openai import OpenAI
+from openai import AsyncOpenAI
 from config import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_PARAMS, logger
 from prompts import SYSTEM_PROMPT
 
-# Настройка клиента OpenAI (Responses API)
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Настройка клиента OpenAI (асинхронный Responses API)
+client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
 def get_novosibirsk_time() -> str:
@@ -96,24 +95,38 @@ async def generate_response(
 
         # Температура может быть не поддержана некоторыми моделями
         temperature = OPENAI_PARAMS.get("temperature")
-        used_temperature = False
         if isinstance(temperature, (int, float)):
             kwargs["temperature"] = float(temperature)
-            used_temperature = True
 
-        def _call_sync():
-            nonlocal used_temperature
-            try:
-                return client.responses.create(**kwargs)
-            except Exception as exc:
-                msg = str(exc)
-                if used_temperature and "Unsupported parameter" in msg and "'temperature'" in msg:
-                    kwargs.pop("temperature", None)
-                    used_temperature = False
-                    return client.responses.create(**kwargs)
+        # Основной запрос к Responses API
+        try:
+            response = await client.responses.create(**kwargs)
+        except Exception as exc:
+            msg = str(exc)
+            # Если модель не поддерживает temperature — повторяем без него
+            if "Unsupported parameter" in msg and "temperature" in msg:
+                kwargs.pop("temperature", None)
+                response = await client.responses.create(**kwargs)
+            # Фолбэк при невалидной модели
+            elif any(substr in msg.lower() for substr in [
+                "invalid model", "invalid model id", "model_not_found", "unknown model"
+            ]):
+                fallback_model = "gpt-4o-mini"
+                logger.warning(
+                    f"Модель {OPENAI_MODEL} недоступна или неверна. Пробую запасную модель: {fallback_model}"
+                )
+                kwargs["model"] = fallback_model
+                try:
+                    response = await client.responses.create(**kwargs)
+                except Exception as inner_exc:
+                    inner_msg = str(inner_exc)
+                    if "Unsupported parameter" in inner_msg and "temperature" in inner_msg:
+                        kwargs.pop("temperature", None)
+                        response = await client.responses.create(**kwargs)
+                    else:
+                        raise
+            else:
                 raise
-
-        response = await asyncio.to_thread(_call_sync)
 
         # Предпочтительный способ получения текста
         text = getattr(response, "output_text", None)
