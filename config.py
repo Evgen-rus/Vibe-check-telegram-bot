@@ -15,7 +15,12 @@ TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 
 # Настройки логирования
 LOGGING_LEVEL = "INFO"
-ENABLE_DIALOG_LOGGING = True
+
+# Управление историей диалога (памятью) в БД:
+# True — сохраняем сообщения user/assistant в SQLite и
+# используем их как контекст при обращении к модели.
+# False — история не накапливается, контекст для модели минимальный.
+ENABLE_MESSAGE_HISTORY = True
 
 # Часовой пояс по умолчанию для напоминаний
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Novosibirsk")

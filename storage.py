@@ -7,7 +7,7 @@ import aiosqlite
 import time
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
-from config import logger, ENABLE_DIALOG_LOGGING, LOCAL_TZ
+from config import logger, ENABLE_MESSAGE_HISTORY, LOCAL_TZ
 
 
 DATA_DIR = "data"
@@ -110,7 +110,7 @@ class Storage:
 
     # ===== messages/history =====
     async def add_message(self, user_id: int, role: str, content: str) -> None:
-        if not ENABLE_DIALOG_LOGGING:
+        if not ENABLE_MESSAGE_HISTORY:
             return
         await self._ensure_user_row(user_id)
         async with aiosqlite.connect(DB_PATH) as db:

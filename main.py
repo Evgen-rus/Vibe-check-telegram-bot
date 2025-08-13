@@ -158,13 +158,13 @@ async def setup_bot_commands(bot: Bot) -> None:
     Регистрирует команды бота, чтобы они отображались в меню Telegram.
     """
     commands = [
-        BotCommand(command="start", description="Начать работу"),
-        BotCommand(command="help", description="Помощь и возможности"),
-        BotCommand(command="clear", description="Очистить историю диалога"),
-        BotCommand(command="remind", description="Добавить напоминание"),
-        BotCommand(command="reminders", description="Список напоминаний"),
-        BotCommand(command="delremind", description="Удалить: /delremind ID"),
-        BotCommand(command="snooze", description="Отложить: /snooze ID [мин]"),
+        BotCommand(command="start", description="🚀 Начать работу"),
+        BotCommand(command="remind", description="⏰ Добавить напоминание"),
+        BotCommand(command="reminders", description="📋 Список напоминаний"),
+        BotCommand(command="delremind", description="🗑️ Удалить напоминание"),
+        BotCommand(command="snooze", description="😴 Отложить напоминание"),
+        BotCommand(command="help", description="🆘 Помощь и возможности"),
+        BotCommand(command="clear", description="🧹 Очистить историю диалога"),
     ]
     await bot.set_my_commands(commands)
 
