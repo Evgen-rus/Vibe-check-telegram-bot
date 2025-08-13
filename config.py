@@ -31,8 +31,11 @@ logger = logging.getLogger(__name__)
 # Параметры запросов к OpenAI
 OPENAI_PARAMS = {
     "temperature": 0.7,
-    "max_tokens": 1000,
-} 
+    "max_tokens": 5000,
+}
+
+# Включать ли краткий контекст задач/напоминаний в промпт модели
+INCLUDE_REMINDERS_IN_PROMPT = True
 
 # Список разрешенных пользователей (Telegram User ID)
 ALLOWED_USERS = [

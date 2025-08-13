@@ -6,7 +6,8 @@ from typing import List, Dict, Optional
 from datetime import datetime
 import pytz
 from openai import AsyncOpenAI
-from config import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_PARAMS, logger
+from config import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_PARAMS, logger, INCLUDE_REMINDERS_IN_PROMPT
+from storage import storage
 from prompts import SYSTEM_PROMPT
 
 # Настройка клиента OpenAI (асинхронный Responses API)
@@ -93,22 +94,15 @@ async def generate_response(
         if isinstance(max_output_tokens, int) and max_output_tokens > 0:
             kwargs["max_output_tokens"] = max_output_tokens
 
-        # Температура может быть не поддержана некоторыми моделями
-        temperature = OPENAI_PARAMS.get("temperature")
-        if isinstance(temperature, (int, float)):
-            kwargs["temperature"] = float(temperature)
+        # Не передаём temperature: некоторые модели (например, GPT-5) не поддерживают этот параметр
 
         # Основной запрос к Responses API
         try:
             response = await client.responses.create(**kwargs)
         except Exception as exc:
             msg = str(exc)
-            # Если модель не поддерживает temperature — повторяем без него
-            if "Unsupported parameter" in msg and "temperature" in msg:
-                kwargs.pop("temperature", None)
-                response = await client.responses.create(**kwargs)
             # Фолбэк при невалидной модели
-            elif any(substr in msg.lower() for substr in [
+            if any(substr in msg.lower() for substr in [
                 "invalid model", "invalid model id", "model_not_found", "unknown model"
             ]):
                 fallback_model = "gpt-4o-mini"
@@ -116,15 +110,7 @@ async def generate_response(
                     f"Модель {OPENAI_MODEL} недоступна или неверна. Пробую запасную модель: {fallback_model}"
                 )
                 kwargs["model"] = fallback_model
-                try:
-                    response = await client.responses.create(**kwargs)
-                except Exception as inner_exc:
-                    inner_msg = str(inner_exc)
-                    if "Unsupported parameter" in inner_msg and "temperature" in inner_msg:
-                        kwargs.pop("temperature", None)
-                        response = await client.responses.create(**kwargs)
-                    else:
-                        raise
+                response = await client.responses.create(**kwargs)
             else:
                 raise
 
@@ -154,16 +140,26 @@ async def generate_response(
         return "Извините, произошла ошибка при обработке запроса. Пожалуйста, повторите попытку позже."
 
 
-async def get_vibe_checker_response(user_messages: List[Dict[str, str]]) -> str:
+async def get_vibe_checker_response(user_messages: List[Dict[str, str]], *, user_id: Optional[int] = None) -> str:
     """
-    Получает ответ от Vibe Checker с временным контекстом.
+    Получает ответ от Vibe Checker с временным контекстом и (опционально) кратким контекстом напоминаний.
 
     Args:
         user_messages: История сообщений пользователя
+        user_id: ID пользователя для выборки напоминаний (необязателен)
 
     Returns:
         Строка с ответом Vibe Checker
     """
     time_context = get_novosibirsk_time()
-    enhanced_system_prompt = f"{SYSTEM_PROMPT}\n\n{time_context}"
+    reminders_block = ""
+    if INCLUDE_REMINDERS_IN_PROMPT and user_id is not None:
+        try:
+            lines = await storage.get_compact_reminders_context(user_id, limit=5)
+            if lines:
+                reminders_block = "\n\nАктивные напоминания пользователя (кратко):\n- " + "\n- ".join(lines)
+        except Exception as exc:
+            logger.warning(f"Не удалось собрать контекст напоминаний: {exc}")
+
+    enhanced_system_prompt = f"{SYSTEM_PROMPT}\n\n{time_context}{reminders_block}"
     return await generate_response(user_messages, enhanced_system_prompt)

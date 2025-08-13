@@ -245,6 +245,7 @@ async def cmd_remind(message: Message) -> None:
     - /remind будни HH:MM текст — по будням (пн-пт)
     - /remind выходные HH:MM текст — по выходным (сб-вс)
     - /remind пн,ср,пт HH:MM текст — по перечисленным дням (пн,вт,ср,чт,пт,сб,вс)
+    - /remind каждые Nмин HH:MM-HH:MM текст
     """
     user_id = message.from_user.id
     await storage.set_chat_id(user_id, message.chat.id)
@@ -260,7 +261,8 @@ async def cmd_remind(message: Message) -> None:
             "- /remind YYYY-MM-DD HH:MM текст\n"
             "- /remind будни HH:MM текст\n"
             "- /remind выходные HH:MM текст\n"
-            "- /remind пн,ср,пт HH:MM текст"
+            "- /remind пн,ср,пт HH:MM текст\n"
+            "- /remind каждые Nмин HH:MM-HH:MM текст"
         )
         return
 
@@ -273,6 +275,9 @@ async def cmd_remind(message: Message) -> None:
     weekdays = None
     weekday_only = False
     weekend_only = False
+    period_minutes = None
+    window_start = None
+    window_end = None
 
     # Попытки распознавания форматов
     # 1) одноразовое: YYYY-MM-DD HH:MM текст
@@ -311,6 +316,17 @@ async def cmd_remind(message: Message) -> None:
             else:
                 time_str = None
 
+            # 3.5) периодические: каждые <N>мин [HH:MM-HH:MM] текст
+            if time_str is None:
+                mper = re.match(r"^каждые\s+(\d+)\s*мин(?:\s+(\d{2}:\d{2})-(\d{2}:\d{2}))?\s+(.+)$", body, re.IGNORECASE)
+                if mper:
+                    period_minutes = int(mper.group(1))
+                    window_start = mper.group(2)
+                    window_end = mper.group(3)
+                    text = mper.group(4)
+                    # для совместимости требуем time_str, поставим начало окна либо 00:00
+                    time_str = window_start if window_start else "00:00"
+
             if time_str is None:
                 # 4) базовый: HH:MM текст
                 m4 = re.match(r"^(\d{2}:\d{2})\s+(.+)$", body)
@@ -321,7 +337,8 @@ async def cmd_remind(message: Message) -> None:
                         "- /remind 2025-08-13 09:30 важный созвон\n"
                         "- /remind будни 08:00 пробежка\n"
                         "- /remind выходные 10:30 созвон с родителями\n"
-                        "- /remind пн,ср,пт 19:00 спортзал"
+                        "- /remind пн,ср,пт 19:00 спортзал\n"
+                        "- /remind каждые 60мин 09:00-21:00 вода"
                     )
                     return
                 time_str, text = m4.group(1), m4.group(2)
@@ -335,6 +352,9 @@ async def cmd_remind(message: Message) -> None:
             weekdays=weekdays,
             weekday_only=weekday_only,
             weekend_only=weekend_only,
+            period_minutes=period_minutes,
+            window_start_hhmm=window_start,
+            window_end_hhmm=window_end,
         )
         await message.answer(
             f"Напоминание добавлено: [{reminder['id']}] {reminder['time']} — {reminder['text']}"
@@ -358,8 +378,37 @@ async def cmd_reminders(message: Message) -> None:
             "Также можно: /remind 08:30 зарядка"
         )
         return
-    lines = [f"[{r['id']}] {r['time']} — {r['text']}" for r in reminders]
-    await message.answer("Ваши напоминания:\n" + "\n".join(lines))
+    # Формируем подробный список и инлайн-кнопки
+    lines = []
+    keyboard_rows = []
+    for r in reminders:
+        extra_parts = []
+        if r.get('date_once'):
+            extra_parts.append(f"дата: {r['date_once']}")
+        if r.get('weekday_only'):
+            extra_parts.append("будни")
+        if r.get('weekend_only'):
+            extra_parts.append("выходные")
+        if r.get('weekdays'):
+            # строки вида "0,2,4" -> пн,ср,пт
+            idx_to_ru = {0:"пн",1:"вт",2:"ср",3:"чт",4:"пт",5:"сб",6:"вс"}
+            try:
+                items = [idx_to_ru.get(int(x), str(x)) for x in r['weekdays'].split(',') if x]
+                if items:
+                    extra_parts.append("дни: " + ",".join(items))
+            except Exception:
+                pass
+        if r.get('snooze_until'):
+            extra_parts.append(f"отложено до {r['snooze_until']}")
+        extras = f" ({'; '.join(extra_parts)})" if extra_parts else ""
+        lines.append(f"[{r['id']}] {r['time']} — {r['text']}{extras}")
+        keyboard_rows.append([
+            InlineKeyboardButton(text=f"Удалить [{r['id']}]", callback_data=f"delremind:{r['id']}"),
+            InlineKeyboardButton(text=f"Отложить 10 мин", callback_data=f"snooze:{r['id']}:10"),
+        ])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+    await message.answer("Ваши напоминания:\n" + "\n".join(lines), reply_markup=kb)
 
 
 @dp.message(Command("delremind"))
@@ -498,7 +547,7 @@ async def handle_message(message: Message) -> None:
     
     try:
         # Получаем ответ от Vibe Checker
-        response_text = await get_vibe_checker_response(message_history)
+        response_text = await get_vibe_checker_response(message_history, user_id=user_id)
         
         # Отправляем ответ без добавления упоминания пользователя
         await send_markdown_safe(chat_id, response_text)
@@ -554,7 +603,7 @@ async def handle_voice_message(message: Message) -> None:
         message_history = await storage.get_message_history(user_id)
         
         # Получаем ответ от Vibe Checker
-        response_text = await get_vibe_checker_response(message_history)
+        response_text = await get_vibe_checker_response(message_history, user_id=user_id)
         
         # Отправляем ответ пользователю
         await send_markdown_safe(chat_id, response_text)
@@ -607,6 +656,9 @@ async def main() -> None:
                                 await storage.clear_snooze(user_id_int, int(reminder['id']))
                             else:
                                 await storage.mark_reminder_sent(user_id_int, int(reminder['id']), today)
+                            # Если напоминание периодическое — двигаем next_fire_at
+                            if reminder.get('periodic') is True:
+                                await storage.bump_periodic_next_fire(user_id_int, int(reminder['id']), now_iso)
                         except Exception as send_err:
                             logger.error(f"Не удалось отправить напоминание {reminder}: {send_err}")
                 await asyncio.sleep(30)

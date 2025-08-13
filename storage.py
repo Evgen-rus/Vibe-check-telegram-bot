@@ -6,7 +6,8 @@ import os
 import aiosqlite
 import time
 from typing import Dict, List, Any, Optional, Tuple
-from config import logger, ENABLE_DIALOG_LOGGING
+from datetime import datetime, timedelta
+from config import logger, ENABLE_DIALOG_LOGGING, LOCAL_TZ
 
 
 DATA_DIR = "data"
@@ -61,6 +62,24 @@ class Storage:
                 )
                 """
             )
+            # Добавляем недостающие колонки для периодических напоминаний
+            try:
+                cols: List[str] = []
+                async with db.execute("PRAGMA table_info(reminders)") as cinfo:
+                    rows = await cinfo.fetchall()
+                    cols = [str(r[1]) for r in rows]
+                async def add_col(name: str, ddl: str) -> None:
+                    await db.execute(f"ALTER TABLE reminders ADD COLUMN {name} {ddl}")
+                if "period_minutes" not in cols:
+                    await add_col("period_minutes", "INTEGER")
+                if "window_start_hhmm" not in cols:
+                    await add_col("window_start_hhmm", "TEXT")
+                if "window_end_hhmm" not in cols:
+                    await add_col("window_end_hhmm", "TEXT")
+                if "next_fire_at" not in cols:
+                    await add_col("next_fire_at", "TEXT")
+            except Exception:
+                pass
             await db.commit()
         self._initialized = True
 
@@ -129,6 +148,9 @@ class Storage:
         weekdays: Optional[List[int]] = None,
         weekday_only: bool = False,
         weekend_only: bool = False,
+        period_minutes: Optional[int] = None,
+        window_start_hhmm: Optional[str] = None,
+        window_end_hhmm: Optional[str] = None,
     ) -> Dict[str, Any]:
         # Валидация времени
         try:
@@ -146,11 +168,67 @@ class Storage:
             weekdays_sorted = sorted(int(d) for d in weekdays)
             weekdays_str = ",".join(str(d) for d in weekdays_sorted)
 
+        # Рассчитываем next_fire_at для периодических напоминаний
+        next_fire_at: Optional[str] = None
+        if isinstance(period_minutes, int) and period_minutes > 0:
+            now_local = datetime.now(LOCAL_TZ)
+            fire = now_local + timedelta(minutes=int(period_minutes))
+
+            def is_day_allowed(dt):
+                idx = dt.weekday()
+                if weekday_only and idx > 4:
+                    return False
+                if weekend_only and idx < 5:
+                    return False
+                if weekdays:
+                    try:
+                        return idx in {int(x) for x in weekdays}
+                    except Exception:
+                        return True
+                return True
+
+            def window_bounds(dt):
+                if not (window_start_hhmm and window_end_hhmm):
+                    return None
+                try:
+                    sh, sm = [int(x) for x in window_start_hhmm.split(":")]
+                    eh, em = [int(x) for x in window_end_hhmm.split(":")]
+                    start = dt.replace(hour=sh, minute=sm, second=0, microsecond=0)
+                    end = dt.replace(hour=eh, minute=em, second=0, microsecond=0)
+                    return (start, end)
+                except Exception:
+                    return None
+
+            max_steps = 365
+            steps = 0
+            while True:
+                steps += 1
+                if steps > max_steps:
+                    break
+                if not is_day_allowed(fire):
+                    fire = (fire.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
+                wb = window_bounds(fire)
+                if wb:
+                    ws, we = wb
+                    if fire < ws:
+                        fire = ws
+                    elif fire > we:
+                        fire = ws + timedelta(days=1)
+                        continue
+                if (not wb or (wb and wb[0] <= fire <= wb[1])) and is_day_allowed(fire):
+                    break
+                fire = fire + timedelta(minutes=int(period_minutes))
+
+            next_fire_at = fire.strftime("%Y-%m-%d %H:%M")
+
         async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute(
                 """
-                INSERT INTO reminders(user_id, time_hhmm, text, last_sent_date, date_once, weekdays, weekday_only, weekend_only, snooze_until)
-                VALUES (?, ?, ?, NULL, ?, ?, ?, ?, NULL)
+                INSERT INTO reminders(
+                    user_id, time_hhmm, text, last_sent_date, date_once, weekdays, weekday_only, weekend_only,
+                    snooze_until, period_minutes, window_start_hhmm, window_end_hhmm, next_fire_at
+                )
+                VALUES (?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -160,6 +238,10 @@ class Storage:
                     weekdays_str,
                     1 if weekday_only else 0,
                     1 if weekend_only else 0,
+                    period_minutes if period_minutes else None,
+                    window_start_hhmm,
+                    window_end_hhmm,
+                    next_fire_at,
                 ),
             )
             await db.commit()
@@ -174,14 +256,28 @@ class Storage:
         await self._init_schema()
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
-                "SELECT id, time_hhmm, text FROM reminders WHERE user_id=? ORDER BY time_hhmm ASC, id ASC",
+                """
+                SELECT id, time_hhmm, text, date_once, weekdays, weekday_only, weekend_only, snooze_until
+                FROM reminders
+                WHERE user_id=?
+                ORDER BY time_hhmm ASC, id ASC
+                """,
                 (user_id,),
             ) as cur:
                 rows = await cur.fetchall()
-        return [
-            {"id": int(r[0]), "time": r[1], "text": r[2]}
-            for r in rows
-        ]
+        result: List[Dict[str, Any]] = []
+        for r in rows:
+            result.append({
+                "id": int(r[0]),
+                "time": r[1],
+                "text": r[2],
+                "date_once": r[3],
+                "weekdays": r[4],
+                "weekday_only": bool(r[5]) if r[5] is not None else False,
+                "weekend_only": bool(r[6]) if r[6] is not None else False,
+                "snooze_until": r[7],
+            })
+        return result
 
     async def delete_reminder(self, user_id: int, identifier: int) -> bool:
         await self._init_schema()
@@ -279,10 +375,54 @@ class Storage:
         for r in rows_snooze:
             rid, uid, time_val, text_val, snooze_until = r
             due.append(
-                (int(uid), {"id": int(rid), "time": time_val, "text": text_val}, True)
+                (int(uid), {"id": int(rid), "time": time_val, "text": text_val, "periodic": None}, True)
             )
 
+        # Периодические срабатывания по next_fire_at
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                """
+                SELECT id, user_id, text
+                FROM reminders
+                WHERE period_minutes IS NOT NULL AND next_fire_at IS NOT NULL AND next_fire_at<=?
+                """,
+                (now_iso,),
+            ) as cur3:
+                rows_period = await cur3.fetchall()
+        for r in rows_period:
+            rid, uid, text_val = r
+            due.append((int(uid), {"id": int(rid), "time": None, "text": text_val, "periodic": True}, False))
+
         return due
+
+    async def get_compact_reminders_context(self, user_id: int, limit: int = 5) -> List[str]:
+        """
+        Возвращает краткий список ближайших напоминаний пользователя
+        в виде строк: HH:MM — текст (c пометками расписания/даты).
+        """
+        items = await self.list_reminders(user_id)
+        # Сортируем по времени и id
+        items_sorted = sorted(items, key=lambda r: (r.get("time", ""), r.get("id", 0)))
+        lines: List[str] = []
+        for r in items_sorted[:limit]:
+            extras = []
+            if r.get("date_once"):
+                extras.append(f"дата {r['date_once']}")
+            if r.get("weekday_only"):
+                extras.append("будни")
+            if r.get("weekend_only"):
+                extras.append("выходные")
+            if r.get("weekdays"):
+                idx_to_ru = {0:"пн",1:"вт",2:"ср",3:"чт",4:"пт",5:"сб",6:"вс"}
+                try:
+                    items_days = [idx_to_ru.get(int(x), str(x)) for x in r['weekdays'].split(',') if x]
+                    if items_days:
+                        extras.append("дни: " + ",".join(items_days))
+                except Exception:
+                    pass
+            extra_str = f" ({'; '.join(extras)})" if extras else ""
+            lines.append(f"{r['time']} — {r['text']}{extra_str}")
+        return lines
 
     async def mark_reminder_sent(self, user_id: int, reminder_id: int, today_date: str) -> None:
         await self._init_schema()
@@ -308,6 +448,77 @@ class Storage:
             await db.execute(
                 "UPDATE reminders SET snooze_until=? WHERE user_id=? AND id=?",
                 (snooze_until_iso, user_id, int(reminder_id)),
+            )
+            await db.commit()
+
+    async def bump_periodic_next_fire(self, user_id: int, reminder_id: int, now_iso: str) -> None:
+        """
+        Сдвигает next_fire_at вперёд на один интервал с учётом окна и ограничений по дням.
+        """
+        await self._init_schema()
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT period_minutes, window_start_hhmm, window_end_hhmm, weekday_only, weekend_only, weekdays FROM reminders WHERE user_id=? AND id=?",
+                (user_id, int(reminder_id)),
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return
+            per_min, wnd_start, wnd_end, wk_only, we_only, wds = row
+            if not per_min:
+                return
+            base = datetime.strptime(now_iso, "%Y-%m-%d %H:%M")
+            base = LOCAL_TZ.localize(base)
+            fire = base + timedelta(minutes=int(per_min))
+
+            def is_day_allowed(dt: datetime) -> bool:
+                idx = dt.weekday()
+                if wk_only and idx > 4:
+                    return False
+                if we_only and idx < 5:
+                    return False
+                if wds:
+                    try:
+                        return idx in {int(x) for x in str(wds).split(',') if x}
+                    except Exception:
+                        return True
+                return True
+
+            def window_bounds(dt: datetime) -> Optional[Tuple[datetime, datetime]]:
+                if not (wnd_start and wnd_end):
+                    return None
+                try:
+                    sh, sm = [int(x) for x in str(wnd_start).split(":")]
+                    eh, em = [int(x) for x in str(wnd_end).split(":")]
+                    start = dt.replace(hour=sh, minute=sm, second=0, microsecond=0)
+                    end = dt.replace(hour=eh, minute=em, second=0, microsecond=0)
+                    return (start, end)
+                except Exception:
+                    return None
+
+            max_steps = 365
+            steps = 0
+            while True:
+                steps += 1
+                if steps > max_steps:
+                    break
+                if not is_day_allowed(fire):
+                    fire = (fire.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
+                wb = window_bounds(fire)
+                if wb:
+                    ws, we = wb
+                    if fire < ws:
+                        fire = ws
+                    elif fire > we:
+                        fire = ws + timedelta(days=1)
+                        continue
+                if (not wb or (wb and wb[0] <= fire <= wb[1])) and is_day_allowed(fire):
+                    break
+                fire = fire + timedelta(minutes=int(per_min))
+
+            await db.execute(
+                "UPDATE reminders SET next_fire_at=?, snooze_until=NULL WHERE user_id=? AND id=?",
+                (fire.strftime("%Y-%m-%d %H:%M"), user_id, int(reminder_id)),
             )
             await db.commit()
 
