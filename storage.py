@@ -1,128 +1,136 @@
 """
-Модуль для хранения и управления данными пользователей.
+Модуль для хранения и управления данными пользователей (SQLite, aiosqlite).
 """
 
-import json
 import os
+import aiosqlite
 import time
 from typing import Dict, List, Any, Optional, Tuple
 from config import logger, ENABLE_DIALOG_LOGGING
 
-# Директория для хранения данных
-DATA_DIR = "data"
-USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
-# Создаем директорию для данных, если она не существует
+DATA_DIR = "data"
+DB_PATH = os.path.join(DATA_DIR, "bot.db")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 
 class Storage:
     """
-    Класс для хранения и управления данными пользователей.
+    Хранилище на aiosqlite: пользователи, сообщения, напоминания.
     """
-    def __init__(self):
-        """
-        Инициализация хранилища данных.
-        Загружает существующие данные пользователей, если они есть.
-        """
-        self.users_data = {}
-        self._load_data()
-    
-    def _load_data(self) -> None:
-        """
-        Загружает данные пользователей из файла.
-        """
-        if os.path.exists(USERS_FILE):
-            try:
-                with open(USERS_FILE, 'r', encoding='utf-8') as file:
-                    self.users_data = json.load(file)
-                logger.info(f"Данные пользователей загружены из {USERS_FILE}")
-            except Exception as e:
-                logger.error(f"Ошибка при загрузке данных пользователей: {e}")
-                self.users_data = {}
-    
-    def _save_data(self) -> None:
-        """
-        Сохраняет данные пользователей в файл.
-        """
-        try:
-            with open(USERS_FILE, 'w', encoding='utf-8') as file:
-                json.dump(self.users_data, file, ensure_ascii=False, indent=2)
-            logger.debug(f"Данные пользователей сохранены в {USERS_FILE}")
-        except Exception as e:
-            logger.error(f"Ошибка при сохранении данных пользователей: {e}")
-    
-    def get_user_data(self, user_id: int) -> Dict[str, Any]:
-        """
-        Получает данные пользователя по его ID.
-        Если пользователь не существует, создает новую запись.
-        
-        Args:
-            user_id: ID пользователя в Telegram
-            
-        Returns:
-            Dict с данными пользователя
-        """
-        user_id_str = str(user_id)
-        
-        if user_id_str not in self.users_data:
-            # Создаем новую запись для пользователя
-            self.users_data[user_id_str] = {
-                "messages": [],
-                "last_interaction": time.time(),
-                # Список напоминаний пользователя
-                # Формат элемента: {id, time: "HH:MM", text: str, last_sent_date: "YYYY-MM-DD" | None}
-                "reminders": [],
-                # Последний известный chat_id для отправки системных сообщений
-                "chat_id": None,
-            }
-            self._save_data()
-            
-        return self.users_data[user_id_str]
-    
-    def add_message(self, user_id: int, role: str, content: str) -> None:
-        """
-        Добавляет сообщение в историю диалога пользователя.
-        
-        Args:
-            user_id: ID пользователя в Telegram
-            role: Роль отправителя ('user' или 'assistant')
-            content: Содержимое сообщения
-        """
+
+    def __init__(self) -> None:
+        self._initialized: bool = False
+
+    async def _init_schema(self) -> None:
+        if self._initialized:
+            return
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    chat_id INTEGER
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    ts REAL NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    time_hhmm TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    last_sent_date TEXT,
+                    date_once TEXT,
+                    weekdays TEXT,
+                    weekday_only INTEGER DEFAULT 0,
+                    weekend_only INTEGER DEFAULT 0,
+                    snooze_until TEXT
+                )
+                """
+            )
+            await db.commit()
+        self._initialized = True
+
+    # ===== utils =====
+    async def _ensure_user_row(self, user_id: int) -> None:
+        await self._init_schema()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (user_id,))
+            await db.commit()
+
+    # ===== users/chat =====
+    async def set_chat_id(self, user_id: int, chat_id: int) -> None:
+        await self._ensure_user_row(user_id)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO users(user_id, chat_id) VALUES (?, ?)\n"
+                "ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id",
+                (user_id, int(chat_id)),
+            )
+            await db.commit()
+
+    async def get_chat_id(self, user_id: int) -> Optional[int]:
+        await self._init_schema()
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT chat_id FROM users WHERE user_id=?", (user_id,)) as cur:
+                row = await cur.fetchone()
+                return int(row[0]) if row and row[0] is not None else None
+
+    # ===== messages/history =====
+    async def add_message(self, user_id: int, role: str, content: str) -> None:
         if not ENABLE_DIALOG_LOGGING:
             return
-            
-        user_data = self.get_user_data(user_id)
-        user_data["messages"].append({
-            "role": role,
-            "content": content
-        })
-        user_data["last_interaction"] = time.time()
-        self._save_data()
+        await self._ensure_user_row(user_id)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO messages(user_id, role, content, ts) VALUES (?, ?, ?, ?)",
+                (user_id, role, content, time.time()),
+            )
+            await db.commit()
 
-    # ===== Напоминания =====
-    def set_chat_id(self, user_id: int, chat_id: int) -> None:
-        """
-        Сохраняет последний известный chat_id пользователя для отправки напоминаний.
-        """
-        user_data = self.get_user_data(user_id)
-        user_data["chat_id"] = int(chat_id)
-        self._save_data()
+    async def get_message_history(self, user_id: int, max_messages: int = 50) -> List[Dict[str, str]]:
+        await self._init_schema()
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT role, content FROM messages WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                (user_id, max_messages),
+            ) as cur:
+                rows = await cur.fetchall()
+        result = [{"role": r[0], "content": r[1]} for r in rows][::-1]
+        return result
 
-    def get_chat_id(self, user_id: int) -> Optional[int]:
-        """
-        Возвращает сохраненный chat_id пользователя, если есть.
-        """
-        user_data = self.get_user_data(user_id)
-        return user_data.get("chat_id")
+    async def clear_history(self, user_id: int) -> None:
+        await self._init_schema()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
+            await db.commit()
 
-    def add_reminder(self, user_id: int, time_hh_mm: str, text: str) -> Dict[str, Any]:
-        """
-        Добавляет напоминание пользователю.
-
-        time_hh_mm должен быть в формате HH:MM (24 часа).
-        """
-        # Валидация формата времени
+    # ===== reminders =====
+    async def add_reminder(
+        self,
+        user_id: int,
+        time_hh_mm: str,
+        text: str,
+        *,
+        date_once: Optional[str] = None,
+        weekdays: Optional[List[int]] = None,
+        weekday_only: bool = False,
+        weekend_only: bool = False,
+    ) -> Dict[str, Any]:
+        # Валидация времени
         try:
             hours_str, minutes_str = time_hh_mm.split(":")
             hours = int(hours_str)
@@ -132,123 +140,176 @@ class Storage:
         except Exception:
             raise ValueError("Неверный формат времени. Используйте HH:MM, например 09:30")
 
-        user_data = self.get_user_data(user_id)
-        reminders: List[Dict[str, Any]] = user_data.setdefault("reminders", [])
+        await self._ensure_user_row(user_id)
+        weekdays_str = None
+        if weekdays:
+            weekdays_sorted = sorted(int(d) for d in weekdays)
+            weekdays_str = ",".join(str(d) for d in weekdays_sorted)
 
-        # Генерация нового ID
-        new_id = 1
-        if reminders:
-            try:
-                new_id = max(int(r.get("id", 0)) for r in reminders) + 1
-            except Exception:
-                new_id = len(reminders) + 1
-
-        reminder = {
-            "id": new_id,
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                """
+                INSERT INTO reminders(user_id, time_hhmm, text, last_sent_date, date_once, weekdays, weekday_only, weekend_only, snooze_until)
+                VALUES (?, ?, ?, NULL, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    user_id,
+                    f"{hours:02d}:{minutes:02d}",
+                    text.strip(),
+                    date_once,
+                    weekdays_str,
+                    1 if weekday_only else 0,
+                    1 if weekend_only else 0,
+                ),
+            )
+            await db.commit()
+            reminder_id = cur.lastrowid
+        return {
+            "id": int(reminder_id),
             "time": f"{hours:02d}:{minutes:02d}",
             "text": text.strip(),
-            "last_sent_date": None,
         }
-        reminders.append(reminder)
-        self._save_data()
-        return reminder
 
-    def list_reminders(self, user_id: int) -> List[Dict[str, Any]]:
-        """
-        Возвращает список напоминаний пользователя.
-        """
-        user_data = self.get_user_data(user_id)
-        return list(user_data.get("reminders", []))
+    async def list_reminders(self, user_id: int) -> List[Dict[str, Any]]:
+        await self._init_schema()
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT id, time_hhmm, text FROM reminders WHERE user_id=? ORDER BY time_hhmm ASC, id ASC",
+                (user_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [
+            {"id": int(r[0]), "time": r[1], "text": r[2]}
+            for r in rows
+        ]
 
-    def delete_reminder(self, user_id: int, identifier: int) -> bool:
-        """
-        Удаляет напоминание по ID или по порядковому номеру в списке (1..N).
+    async def delete_reminder(self, user_id: int, identifier: int) -> bool:
+        await self._init_schema()
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "DELETE FROM reminders WHERE user_id=? AND id=?",
+                (user_id, int(identifier)),
+            )
+            await db.commit()
+            if cur.rowcount and cur.rowcount > 0:
+                return True
 
-        Возвращает True, если удалено, иначе False.
-        """
-        user_data = self.get_user_data(user_id)
-        reminders: List[Dict[str, Any]] = user_data.get("reminders", [])
-        if not reminders:
-            return False
-
-        # Пытаемся как ID
-        for idx, r in enumerate(reminders):
-            try:
-                if int(r.get("id")) == int(identifier):
-                    del reminders[idx]
-                    self._save_data()
-                    return True
-            except Exception:
-                pass
-
-        # Пытаемся как порядковый номер
+        items = await self.list_reminders(user_id)
         index_zero_based = int(identifier) - 1
-        if 0 <= index_zero_based < len(reminders):
-            del reminders[index_zero_based]
-            self._save_data()
+        if 0 <= index_zero_based < len(items):
+            real_id = items[index_zero_based]["id"]
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "DELETE FROM reminders WHERE user_id=? AND id=?",
+                    (user_id, int(real_id)),
+                )
+                await db.commit()
             return True
         return False
 
-    def get_due_reminders(self, time_hh_mm: str, today_date: str) -> List[Tuple[int, Dict[str, Any]]]:
+    async def get_due_reminders(
+        self,
+        time_hh_mm: str,
+        today_date: str,
+        weekday_idx: int,
+        now_iso: str,
+    ) -> List[Tuple[int, Dict[str, Any], bool]]:
         """
-        Возвращает список напоминаний, которые должны сработать в указанное время.
+        Возвращает список напоминаний, которые нужно отправить сейчас.
+        Учитывает два источника срабатывания:
+        - нормальное время (time_hhmm == текущему) + условия расписания
+        - отложенное срабатывание (snooze_until <= now_iso)
 
-        Чтобы избежать повторной отправки в тот же день, используется поле last_sent_date.
+        Возвращает кортежи (user_id, reminder_row_as_dict, is_snooze).
+        При is_snooze=True нужно только сбросить snooze, last_sent_date менять не надо.
+        При обычном срабатывании — установить last_sent_date=today_date и сбросить snooze.
         """
-        due: List[Tuple[int, Dict[str, Any]]] = []
-        for user_id_str, user_data in self.users_data.items():
-            reminders: List[Dict[str, Any]] = user_data.get("reminders", [])
-            for r in reminders:
-                if r.get("time") == time_hh_mm and r.get("last_sent_date") != today_date:
-                    try:
-                        user_id_int = int(user_id_str)
-                        due.append((user_id_int, r))
-                    except Exception:
-                        continue
+        await self._init_schema()
+        due: List[Tuple[int, Dict[str, Any], bool]] = []
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Напоминания по основному времени (не snooze), ещё не отправленные сегодня
+            async with db.execute(
+                """
+                SELECT id, user_id, time_hhmm, text, last_sent_date, date_once, weekdays, weekday_only, weekend_only, snooze_until
+                FROM reminders
+                WHERE time_hhmm=?
+                  AND (last_sent_date IS NULL OR last_sent_date<>?)
+                """,
+                (time_hh_mm, today_date),
+            ) as cur:
+                rows_time = await cur.fetchall()
+
+        for r in rows_time:
+            rid, uid, time_val, text_val, last_sent, date_once, weekdays_str, weekday_only, weekend_only, snooze_until = r
+
+            # Условия расписания
+            is_weekday = 0 <= weekday_idx <= 4
+            is_weekend = 5 <= weekday_idx <= 6
+
+            if date_once and date_once != today_date:
+                continue
+            if weekday_only and not is_weekday:
+                continue
+            if weekend_only and not is_weekend:
+                continue
+            if weekdays_str:
+                try:
+                    allowed = {int(x) for x in weekdays_str.split(',') if x}
+                except Exception:
+                    allowed = set()
+                if weekday_idx not in allowed:
+                    continue
+
+            due.append(
+                (int(uid), {"id": int(rid), "time": time_val, "text": text_val}, False)
+            )
+
+        # Срабатывания по snooze (игнорируют last_sent_date)
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                """
+                SELECT id, user_id, time_hhmm, text, snooze_until
+                FROM reminders
+                WHERE snooze_until IS NOT NULL AND snooze_until<=?
+                """,
+                (now_iso,),
+            ) as cur2:
+                rows_snooze = await cur2.fetchall()
+        for r in rows_snooze:
+            rid, uid, time_val, text_val, snooze_until = r
+            due.append(
+                (int(uid), {"id": int(rid), "time": time_val, "text": text_val}, True)
+            )
+
         return due
 
-    def mark_reminder_sent(self, user_id: int, reminder_id: int, today_date: str) -> None:
-        """
-        Помечает напоминание как отправленное сегодня, чтобы не дублировать в течение дня.
-        """
-        user_data = self.get_user_data(user_id)
-        reminders: List[Dict[str, Any]] = user_data.get("reminders", [])
-        for r in reminders:
-            try:
-                if int(r.get("id")) == int(reminder_id):
-                    r["last_sent_date"] = today_date
-                    break
-            except Exception:
-                continue
-        self._save_data()
-    
-    def get_message_history(self, user_id: int, max_messages: int = 50) -> List[Dict[str, str]]:
-        """
-        Получает историю сообщений пользователя.
-        
-        Args:
-            user_id: ID пользователя в Telegram
-            max_messages: Максимальное количество сообщений для возврата
-            
-        Returns:
-            Список словарей сообщений в формате OpenAI: [{"role": "...", "content": "..."}]
-        """
-        user_data = self.get_user_data(user_id)
-        # Возвращаем последние max_messages сообщений
-        return user_data["messages"][-max_messages:]
-    
+    async def mark_reminder_sent(self, user_id: int, reminder_id: int, today_date: str) -> None:
+        await self._init_schema()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE reminders SET last_sent_date=?, snooze_until=NULL WHERE user_id=? AND id=?",
+                (today_date, user_id, int(reminder_id)),
+            )
+            await db.commit()
 
-    def clear_history(self, user_id: int) -> None:
-        """
-        Очищает историю сообщений пользователя.
-        
-        Args:
-            user_id: ID пользователя в Telegram
-        """
-        user_data = self.get_user_data(user_id)
-        user_data["messages"] = []
-        self._save_data()
-        
+    async def clear_snooze(self, user_id: int, reminder_id: int) -> None:
+        await self._init_schema()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE reminders SET snooze_until=NULL WHERE user_id=? AND id=?",
+                (user_id, int(reminder_id)),
+            )
+            await db.commit()
 
-# Создаем экземпляр хранилища
-storage = Storage() 
+    async def set_reminder_snooze(self, user_id: int, reminder_id: int, snooze_until_iso: str) -> None:
+        await self._init_schema()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE reminders SET snooze_until=? WHERE user_id=? AND id=?",
+                (snooze_until_iso, user_id, int(reminder_id)),
+            )
+            await db.commit()
+
+
+storage = Storage()

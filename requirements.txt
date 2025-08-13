@@ -3,3 +3,4 @@ openai==1.99.9
 python-dotenv==1.0.0
 aiofiles==23.2.1
 pytz==2025.2 
+aiosqlite==0.21.0
