@@ -9,7 +9,7 @@ Usage:
 import asyncio
 import io
 import contextlib
-from typing import List
+from typing import List, Optional
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, BaseFilter
 from aiogram.types import Message, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -22,6 +22,7 @@ from prompts import WELCOME_MESSAGE, HELP_MESSAGE
 from audio_handler import transcribe_voice
 from datetime import datetime, timedelta
 import re
+import time
 
 # Инициализация бота и диспетчера
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -168,6 +169,154 @@ async def setup_bot_commands(bot: Bot) -> None:
     await bot.set_my_commands(commands)
 
 
+# ========= Мастер добавления напоминаний (inline) =========
+WIZARD_TIMEOUT_SEC = 600
+wizard_states: dict[int, dict] = {}
+
+
+def _wizard_init(user_id: int) -> dict:
+    st = {
+        "updated_at": time.time(),
+        "type": None,
+        "date_once": None,
+        "time_hhmm": None,
+        "weekdays": [],
+        "weekday_only": False,
+        "weekend_only": False,
+        "period_minutes": None,
+        "window_start": None,
+        "window_end": None,
+        "text": None,
+        "awaiting": None,
+    }
+    wizard_states[user_id] = st
+    return st
+
+
+def _wizard_get(user_id: int) -> Optional[dict]:
+    st = wizard_states.get(user_id)
+    if not st:
+        return None
+    if time.time() - st.get("updated_at", 0) > WIZARD_TIMEOUT_SEC:
+        wizard_states.pop(user_id, None)
+        return None
+    return st
+
+
+def _wizard_touch(st: dict) -> None:
+    st["updated_at"] = time.time()
+
+
+def _kb_remind_type() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="Ежедневно", callback_data="r:type:daily"), InlineKeyboardButton(text="Разово (дата)", callback_data="r:type:once")],
+        [InlineKeyboardButton(text="Будни", callback_data="r:type:wk"), InlineKeyboardButton(text="Выходные", callback_data="r:type:we")],
+        [InlineKeyboardButton(text="Дни недели", callback_data="r:type:days")],
+        [InlineKeyboardButton(text="Периодически", callback_data="r:type:periodic")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _kb_hours() -> InlineKeyboardMarkup:
+    hours = [f"{h:02d}" for h in range(6, 24)]
+    rows = []
+    row = []
+    for i, h in enumerate(hours, 1):
+        row.append(InlineKeyboardButton(text=h, callback_data=f"r:timeh:{h}"))
+        if i % 6 == 0:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="r:back:type")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _kb_minutes() -> InlineKeyboardMarkup:
+    mins = ["00", "15", "30", "45"]
+    rows = [[InlineKeyboardButton(text=m, callback_data=f"r:timem:{m}") for m in mins]]
+    rows.append([
+        InlineKeyboardButton(text="+15", callback_data="r:timem:+15"),
+        InlineKeyboardButton(text="+30", callback_data="r:timem:+30"),
+    ])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="r:back:hours")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _kb_date_once() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="Сегодня", callback_data="r:date:today"), InlineKeyboardButton(text="Завтра", callback_data="r:date:tomorrow")],
+        [InlineKeyboardButton(text="Ввести дату (YYYY-MM-DD)", callback_data="r:date:ask")],
+        [InlineKeyboardButton(text="Назад", callback_data="r:back:type")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _kb_days_toggle(st_days: list[int]) -> InlineKeyboardMarkup:
+    names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    rows = []
+    row = []
+    for idx, name in enumerate(names):
+        mark = "✓" if idx in st_days else ""
+        row.append(InlineKeyboardButton(text=f"{name}{mark}", callback_data=f"r:day:{idx}"))
+        if (idx + 1) % 4 == 0:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="Далее", callback_data="r:days:next")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="r:back:type")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _kb_period_presets() -> InlineKeyboardMarkup:
+    presets = [30, 45, 60, 90, 120]
+    rows = []
+    row = []
+    for i, p in enumerate(presets, 1):
+        row.append(InlineKeyboardButton(text=f"{p} мин", callback_data=f"r:per:{p}"))
+        if i % 3 == 0:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="Свои минуты", callback_data="r:per:cust")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="r:back:type")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _kb_window_presets() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="09:00–21:00", callback_data="r:win:09:00-21:00"), InlineKeyboardButton(text="08:00–22:00", callback_data="r:win:08:00-22:00")],
+        [InlineKeyboardButton(text="24/7", callback_data="r:win:24:7"), InlineKeyboardButton(text="Своё окно", callback_data="r:win:cust")],
+        [InlineKeyboardButton(text="Пропустить", callback_data="r:win:none")],
+        [InlineKeyboardButton(text="Назад", callback_data="r:back:per")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _kb_text_presets() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="Вода", callback_data="r:text:water"), InlineKeyboardButton(text="Обед", callback_data="r:text:lunch")],
+        [InlineKeyboardButton(text="Перекус", callback_data="r:text:snack"), InlineKeyboardButton(text="Сон", callback_data="r:text:sleep")],
+        [InlineKeyboardButton(text="Свой текст", callback_data="r:text:custom")],
+        [InlineKeyboardButton(text="Назад", callback_data="r:back:time")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _kb_confirm() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="Создать", callback_data="r:confirm:create")],
+            [InlineKeyboardButton(text="Назад", callback_data="r:back:text")]]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def start_remind_wizard(message: Message) -> None:
+    user_id = message.from_user.id
+    _wizard_init(user_id)
+    await message.answer("Выбери тип напоминания:", reply_markup=_kb_remind_type())
+
+
 def is_user_allowed(user_id: int) -> bool:
     """
     Проверяет, разрешен ли пользователю доступ к боту.
@@ -255,15 +404,7 @@ async def cmd_remind(message: Message) -> None:
         # Убираем саму команду
         body = text_cmd.split(maxsplit=1)[1]
     except Exception:
-        await message.answer(
-            "Форматы:\n"
-            "- /remind HH:MM текст\n"
-            "- /remind YYYY-MM-DD HH:MM текст\n"
-            "- /remind будни HH:MM текст\n"
-            "- /remind выходные HH:MM текст\n"
-            "- /remind пн,ср,пт HH:MM текст\n"
-            "- /remind каждые Nмин HH:MM-HH:MM текст"
-        )
+        await start_remind_wizard(message)
         return
 
     # Наборы для распознавания дней недели
@@ -357,7 +498,7 @@ async def cmd_remind(message: Message) -> None:
             window_end_hhmm=window_end,
         )
         await message.answer(
-            f"Напоминание добавлено: [{reminder['id']}] {reminder['time']} — {reminder['text']}"
+            f"Напоминание добавлено: {reminder['time']} — {reminder['text']}"
         )
     except ValueError as e:
         await message.answer(str(e))
@@ -401,10 +542,9 @@ async def cmd_reminders(message: Message) -> None:
         if r.get('snooze_until'):
             extra_parts.append(f"отложено до {r['snooze_until']}")
         extras = f" ({'; '.join(extra_parts)})" if extra_parts else ""
-        lines.append(f"[{r['id']}] {r['time']} — {r['text']}{extras}")
+        lines.append(f"{r['time']} — {r['text']}{extras}")
         keyboard_rows.append([
-            InlineKeyboardButton(text=f"Удалить [{r['id']}]", callback_data=f"delremind:{r['id']}"),
-            InlineKeyboardButton(text=f"Отложить 10 мин", callback_data=f"snooze:{r['id']}:10"),
+            InlineKeyboardButton(text=f"Удалить {r['time']} — {r['text']}", callback_data=f"delremind:{r['id']}")
         ])
 
     kb = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
@@ -425,7 +565,7 @@ async def cmd_delremind(message: Message) -> None:
             await message.answer("Нет напоминаний для удаления. Сначала добавьте: /remind 13:00 обед")
             return
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"Удалить [{r['id']}] {r['time']} — {r['text']}", callback_data=f"delremind:{r['id']}")]
+            [InlineKeyboardButton(text=f"Удалить {r['time']} — {r['text']}", callback_data=f"delremind:{r['id']}")]
             for r in reminders
         ])
         await message.answer("Выберите напоминание для удаления:", reply_markup=keyboard)
@@ -489,12 +629,263 @@ async def cb_snooze(callback: CallbackQuery) -> None:
     now_local = datetime.now(LOCAL_TZ)
     snooze_until = now_local + timedelta(minutes=minutes)
     snooze_iso = snooze_until.strftime("%Y-%m-%d %H:%M")
-    storage.set_reminder_snooze(user_id, rid, snooze_iso)
+    await storage.set_reminder_snooze(user_id, rid, snooze_iso)
     await callback.answer(f"Отложено на {minutes} мин")
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
+
+
+# ====== Коллбэки мастера напоминаний ======
+
+@dp.callback_query(F.data.startswith("r:type:"))
+async def cb_r_type(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    st = _wizard_get(user_id) or _wizard_init(user_id)
+    _wizard_touch(st)
+    typ = callback.data.split(":", 2)[2]
+    st["type"] = typ
+    if typ == "daily":
+        await callback.message.edit_text("Выбери час:", reply_markup=_kb_hours())
+    elif typ == "once":
+        await callback.message.edit_text("Выбери дату:", reply_markup=_kb_date_once())
+    elif typ in ("wk", "we"):
+        st["weekday_only"] = (typ == "wk")
+        st["weekend_only"] = (typ == "we")
+        await callback.message.edit_text("Выбери час:", reply_markup=_kb_hours())
+    elif typ == "days":
+        await callback.message.edit_text("Выбери дни недели:", reply_markup=_kb_days_toggle(st["weekdays"]))
+    elif typ == "periodic":
+        await callback.message.edit_text("Период (минуты):", reply_markup=_kb_period_presets())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("r:timeh:"))
+async def cb_r_time_hour(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    st = _wizard_get(user_id) or _wizard_init(user_id)
+    _wizard_touch(st)
+    hour = callback.data.split(":", 2)[2]
+    st["time_hhmm"] = f"{hour}:00"
+    await callback.message.edit_text("Выбери минуты:", reply_markup=_kb_minutes())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("r:timem:"))
+async def cb_r_time_min(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    st = _wizard_get(user_id) or _wizard_init(user_id)
+    _wizard_touch(st)
+    val = callback.data.split(":", 2)[2]
+    hh, mm = (st.get("time_hhmm") or "00:00").split(":")
+    if val.startswith("+"):
+        inc = 15 if "+15" in val else 30
+        total = int(hh) * 60 + int(mm) + inc
+        nh = (total // 60) % 24
+        nm = total % 60
+        st["time_hhmm"] = f"{nh:02d}:{nm:02d}"
+    else:
+        st["time_hhmm"] = f"{hh}:{val}"
+    await callback.message.edit_text(f"Время: {st['time_hhmm']}\nВыбери текст или пресет:", reply_markup=_kb_text_presets())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("r:date:"))
+async def cb_r_date(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    st = _wizard_get(user_id) or _wizard_init(user_id)
+    _wizard_touch(st)
+    what = callback.data.split(":", 2)[2]
+    now = datetime.now(LOCAL_TZ)
+    if what == "today":
+        st["date_once"] = now.strftime("%Y-%m-%d")
+        await callback.message.edit_text("Выбери час:", reply_markup=_kb_hours())
+    elif what == "tomorrow":
+        st["date_once"] = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+        await callback.message.edit_text("Выбери час:", reply_markup=_kb_hours())
+    elif what == "ask":
+        st["awaiting"] = "date_once"
+        await callback.message.edit_text("Введи дату формата YYYY-MM-DD")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("r:day:"))
+async def cb_r_day_toggle(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    st = _wizard_get(user_id) or _wizard_init(user_id)
+    _wizard_touch(st)
+    idx = int(callback.data.split(":", 2)[2])
+    days = set(st.get("weekdays") or [])
+    if idx in days:
+        days.remove(idx)
+    else:
+        days.add(idx)
+    st["weekdays"] = sorted(days)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=_kb_days_toggle(st["weekdays"]))
+    except Exception:
+        await callback.message.edit_text("Выбери дни недели:", reply_markup=_kb_days_toggle(st["weekdays"]))
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "r:days:next")
+async def cb_r_days_next(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    st = _wizard_get(user_id) or _wizard_init(user_id)
+    _wizard_touch(st)
+    await callback.message.edit_text("Выбери час:", reply_markup=_kb_hours())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("r:per:"))
+async def cb_r_period(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    st = _wizard_get(user_id) or _wizard_init(user_id)
+    _wizard_touch(st)
+    what = callback.data.split(":", 2)[2]
+    if what == "cust":
+        st["awaiting"] = "period"
+        await callback.message.edit_text("Введи период в минутах, например 60")
+    else:
+        st["period_minutes"] = int(what)
+        await callback.message.edit_text("Окно (необязательно):", reply_markup=_kb_window_presets())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("r:win:"))
+async def cb_r_window(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    st = _wizard_get(user_id) or _wizard_init(user_id)
+    _wizard_touch(st)
+    data = callback.data.split(":", 2)[2]
+    if data == "none":
+        st["window_start"], st["window_end"] = None, None
+    elif data == "cust":
+        st["awaiting"] = "window"
+        await callback.message.edit_text("Введи окно формата HH:MM-HH:MM, например 09:00-21:00")
+        await callback.answer()
+        return
+    elif data == "24:7":
+        st["window_start"], st["window_end"] = None, None
+    else:
+        try:
+            ws, we = data.split("-")
+            st["window_start"], st["window_end"] = ws, we
+        except Exception:
+            st["window_start"], st["window_end"] = None, None
+    await callback.message.edit_text("Текст напоминания:", reply_markup=_kb_text_presets())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("r:text:"))
+async def cb_r_text(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    st = _wizard_get(user_id) or _wizard_init(user_id)
+    _wizard_touch(st)
+    what = callback.data.split(":", 2)[2]
+    presets = {"water": "вода", "lunch": "обед", "snack": "перекус", "sleep": "сон"}
+    if what == "custom":
+        st["awaiting"] = "text"
+        await callback.message.edit_text("Введи текст напоминания сообщением")
+    else:
+        st["text"] = presets.get(what, what)
+        await callback.message.edit_text(_wizard_summary(st), reply_markup=_kb_confirm())
+    await callback.answer()
+
+
+def _wizard_summary(st: dict) -> str:
+    parts = ["Подтвердите напоминание:"]
+    t = st.get("type")
+    if t == "periodic":
+        per = st.get("period_minutes")
+        win = (st.get("window_start"), st.get("window_end"))
+        parts.append(f"- Тип: периодически каждые {per} мин")
+        if any(win):
+            parts.append(f"- Окно: {win[0] or '00:00'}-{win[1] or '24:00'}")
+    else:
+        parts.append(f"- Время: {st.get('time_hhmm')}")
+    if t == "once":
+        parts.append(f"- Дата: {st.get('date_once')}")
+    if t == "wk":
+        parts.append("- Дни: будни")
+    if t == "we":
+        parts.append("- Дни: выходные")
+    if t == "days" and st.get("weekdays"):
+        idx_to_ru = {0:"пн",1:"вт",2:"ср",3:"чт",4:"пт",5:"сб",6:"вс"}
+        parts.append("- Дни: " + ",".join(idx_to_ru[i] for i in st["weekdays"]))
+    parts.append(f"- Текст: {st.get('text')}")
+    return "\n".join(parts)
+
+
+@dp.callback_query(F.data == "r:back:type")
+async def cb_r_back_type(callback: CallbackQuery) -> None:
+    await callback.message.edit_text("Выбери тип напоминания:", reply_markup=_kb_remind_type())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "r:back:hours")
+async def cb_r_back_hours(callback: CallbackQuery) -> None:
+    await callback.message.edit_text("Выбери час:", reply_markup=_kb_hours())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "r:back:time")
+async def cb_r_back_time(callback: CallbackQuery) -> None:
+    await callback.message.edit_text("Выбери минуты:", reply_markup=_kb_minutes())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "r:back:per")
+async def cb_r_back_per(callback: CallbackQuery) -> None:
+    await callback.message.edit_text("Период (минуты):", reply_markup=_kb_period_presets())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "r:back:text")
+async def cb_r_back_text(callback: CallbackQuery) -> None:
+    await callback.message.edit_text("Текст напоминания:", reply_markup=_kb_text_presets())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "r:confirm:create")
+async def cb_r_confirm_create(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    st = _wizard_get(user_id)
+    if not st:
+        await callback.answer("Мастер устарел, начните заново: /remind", show_alert=True)
+        return
+    _wizard_touch(st)
+    typ = st.get("type")
+    time_hhmm = st.get("time_hhmm") or "00:00"
+    text = st.get("text") or "напоминание"
+    date_once = st.get("date_once")
+    weekdays = st.get("weekdays") or None
+    weekday_only = bool(st.get("weekday_only"))
+    weekend_only = bool(st.get("weekend_only"))
+    period_minutes = st.get("period_minutes")
+    window_start = st.get("window_start")
+    window_end = st.get("window_end")
+
+    try:
+        reminder = await storage.add_reminder(
+            user_id,
+            time_hhmm,
+            text.strip(),
+            date_once=date_once,
+            weekdays=weekdays,
+            weekday_only=weekday_only,
+            weekend_only=weekend_only,
+            period_minutes=period_minutes,
+            window_start_hhmm=window_start,
+            window_end_hhmm=window_end,
+        )
+        wizard_states.pop(user_id, None)
+        await callback.message.edit_text(
+            f"Напоминание добавлено: {reminder['time']} — {reminder['text']}"
+        )
+    except Exception as e:
+        await callback.answer(str(e), show_alert=True)
 
 
 @dp.message(Command("snooze"))
@@ -530,6 +921,44 @@ async def handle_message(message: Message) -> None:
         message: Объект сообщения от пользователя
     """
     user_id = message.from_user.id
+    # Перехват ввода для мастера (дата/период/окно/текст)
+    st = _wizard_get(user_id)
+    if st and st.get("awaiting"):
+        kind = st["awaiting"]
+        st["awaiting"] = None
+        _wizard_touch(st)
+        if kind == "date_once":
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", message.text.strip()):
+                st["date_once"] = message.text.strip()
+                await message.answer("Выбери час:", reply_markup=_kb_hours())
+                return
+            else:
+                await message.answer("Формат даты: YYYY-MM-DD. Попробуй ещё раз.")
+                st["awaiting"] = "date_once"
+                return
+        if kind == "period":
+            try:
+                st["period_minutes"] = int(message.text.strip())
+                await message.answer("Окно (необязательно):", reply_markup=_kb_window_presets())
+                return
+            except Exception:
+                await message.answer("Введи число минут, например 60")
+                st["awaiting"] = "period"
+                return
+        if kind == "window":
+            m = re.match(r"^(\d{2}:\d{2})-(\d{2}:\d{2})$", message.text.strip())
+            if m:
+                st["window_start"], st["window_end"] = m.group(1), m.group(2)
+                await message.answer("Текст напоминания:", reply_markup=_kb_text_presets())
+                return
+            else:
+                await message.answer("Формат окна: HH:MM-HH:MM. Попробуй ещё раз.")
+                st["awaiting"] = "window"
+                return
+        if kind == "text":
+            st["text"] = message.text.strip()
+            await message.answer(_wizard_summary(st), reply_markup=_kb_confirm())
+            return
     user_message = message.text
     
     # Используем ID чата для отправки ответа
