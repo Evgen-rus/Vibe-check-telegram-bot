@@ -19,6 +19,7 @@ from config import TELEGRAM_BOT_TOKEN, logger, ALLOWED_USERS, LOCAL_TZ
 from openai_module import get_vibe_checker_response
 from storage import storage
 from prompts import WELCOME_MESSAGE, HELP_MESSAGE
+from prompts import WAIT_HINT_SHORT, WAIT_HINT_VOICE
 from audio_handler import transcribe_voice
 from datetime import datetime, timedelta
 import re
@@ -27,6 +28,59 @@ import time
 # Инициализация бота и диспетчера
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
+# ========= Профиль пользователя =========
+PROFILE_AWAIT: dict[int, str] = {}
+
+def _kb_profile_menu() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="Пол", callback_data="p:sex"), InlineKeyboardButton(text="Возраст", callback_data="p:age")],
+        [InlineKeyboardButton(text="Рост", callback_data="p:height"), InlineKeyboardButton(text="Вес", callback_data="p:weight")],
+        [InlineKeyboardButton(text="Активность", callback_data="p:activity"), InlineKeyboardButton(text="Цель", callback_data="p:goal")],
+        [InlineKeyboardButton(text="Аллергии", callback_data="p:allergies")],
+        [InlineKeyboardButton(text="Диета/ограничения", callback_data="p:diet")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def _format_profile(prof: dict) -> str:
+    lines = ["👤 Профиль пользователя:"]
+    sex_map = {"m": "мужской", "f": "женский"}
+    act_map = {"low": "низкая", "medium": "средняя", "high": "высокая"}
+    goal_map = {"lose": "снижение веса", "maintain": "поддержание", "gain": "набор веса"}
+    lines.append(f"• Пол: {sex_map.get(prof.get('sex'), prof.get('sex') or 'не указан')}")
+    lines.append(f"• Возраст: {prof.get('age') or 'не указан'}")
+    lines.append(f"• Рост, см: {prof.get('height_cm') or 'не указан'}")
+    lines.append(f"• Вес, кг: {prof.get('weight_kg') or 'не указан'}")
+    lines.append(f"• Активность: {act_map.get(prof.get('activity'), prof.get('activity') or 'не указана')}")
+    lines.append(f"• Цель: {goal_map.get(prof.get('goal'), prof.get('goal') or 'не указана')}")
+    lines.append(f"• Аллергии: {prof.get('allergies') or '—'}")
+    lines.append(f"• Диета/ограничения: {prof.get('diet') or '—'}")
+    lines.append("\nНажми кнопку, чтобы изменить поле. Для удаления — отправь пустой ответ.")
+    return "\n".join(lines)
+
+@dp.message(Command("profile"))
+async def cmd_profile(message: Message) -> None:
+    user_id = message.from_user.id
+    await storage.set_chat_id(user_id, message.chat.id)
+    prof = await storage.get_profile(user_id)
+    await message.answer(_format_profile(prof), reply_markup=_kb_profile_menu())
+
+@dp.callback_query(F.data.startswith("p:"))
+async def cb_profile_prompt(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    key = callback.data.split(":", 1)[1]
+    PROFILE_AWAIT[user_id] = key
+    prompts = {
+        "sex": "Введи пол: m — мужской, f — женский",
+        "age": "Введи возраст (целое число лет)",
+        "height": "Введи рост в сантиметрах (целое число)",
+        "weight": "Введи вес в килограммах (число, можно с точкой)",
+        "activity": "Активность: low (низкая) / medium (средняя) / high (высокая)",
+        "goal": "Цель: lose (похудение) / maintain (поддержание) / gain (набор)",
+        "allergies": "Перечисли аллергии или напиши —",
+        "diet": "Укажи диету/ограничения (например, вегетарианство) или напиши —",
+    }
+    await callback.message.answer(prompts.get(key, "Введи значение"))
+    await callback.answer()
 
 
 class AccessFilter(BaseFilter):
@@ -163,6 +217,7 @@ async def setup_bot_commands(bot: Bot) -> None:
         BotCommand(command="reminders", description="📋 Список напоминаний"),
         BotCommand(command="delremind", description="🗑️ Удалить напоминание"),
         BotCommand(command="snooze", description="😴 Отложить напоминание"),
+        BotCommand(command="profile", description="👤 Профиль пользователя"),
         BotCommand(command="help", description="🆘 Помощь и возможности"),
         BotCommand(command="clear", description="🧹 Очистить историю диалога"),
     ]
@@ -921,7 +976,7 @@ async def handle_message(message: Message) -> None:
         message: Объект сообщения от пользователя
     """
     user_id = message.from_user.id
-    # Перехват ввода для мастера (дата/период/окно/текст)
+    # Перехват ввода для мастера (дата/период/окно/текст) и профиля
     st = _wizard_get(user_id)
     if st and st.get("awaiting"):
         kind = st["awaiting"]
@@ -959,6 +1014,71 @@ async def handle_message(message: Message) -> None:
             st["text"] = message.text.strip()
             await message.answer(_wizard_summary(st), reply_markup=_kb_confirm())
             return
+    # Профиль: если ждём значение
+    await storage.set_chat_id(user_id, message.chat.id)
+    prof_key = PROFILE_AWAIT.pop(user_id, None)
+    if prof_key:
+        val_raw = (message.text or "").strip()
+        try:
+            fields = {}
+            if prof_key == "sex":
+                v = val_raw.lower()
+                if v in ("", "-", "none", "null"):
+                    fields["sex"] = None
+                elif v in ("m", "f"):
+                    fields["sex"] = v
+                else:
+                    await message.answer("Используй m или f, либо отправь — чтобы очистить")
+                    PROFILE_AWAIT[user_id] = prof_key
+                    return
+            elif prof_key == "age":
+                if val_raw in ("", "-"):
+                    fields["age"] = None
+                else:
+                    fields["age"] = int(val_raw)
+            elif prof_key == "height":
+                if val_raw in ("", "-"):
+                    fields["height_cm"] = None
+                else:
+                    fields["height_cm"] = int(val_raw)
+            elif prof_key == "weight":
+                if val_raw in ("", "-"):
+                    fields["weight_kg"] = None
+                else:
+                    fields["weight_kg"] = float(val_raw.replace(",", "."))
+            elif prof_key == "activity":
+                v = val_raw.lower()
+                if v in ("", "-"):
+                    fields["activity"] = None
+                elif v in ("low", "medium", "high"):
+                    fields["activity"] = v
+                else:
+                    await message.answer("Доступно: low / medium / high, либо — чтобы очистить")
+                    PROFILE_AWAIT[user_id] = prof_key
+                    return
+            elif prof_key == "goal":
+                v = val_raw.lower()
+                if v in ("", "-"):
+                    fields["goal"] = None
+                elif v in ("lose", "maintain", "gain"):
+                    fields["goal"] = v
+                else:
+                    await message.answer("Доступно: lose / maintain / gain, либо — чтобы очистить")
+                    PROFILE_AWAIT[user_id] = prof_key
+                    return
+            elif prof_key == "allergies":
+                fields["allergies"] = None if val_raw in ("", "-") else val_raw
+            elif prof_key == "diet":
+                fields["diet"] = None if val_raw in ("", "-") else val_raw
+            if fields:
+                await storage.set_profile_fields(user_id, **fields)
+            prof = await storage.get_profile(user_id)
+            await message.answer("Сохранено.\n\n" + _format_profile(prof), reply_markup=_kb_profile_menu())
+            return
+        except Exception:
+            await message.answer("Не удалось сохранить. Проверь формат и попробуй ещё раз.")
+            PROFILE_AWAIT[user_id] = prof_key
+            return
     user_message = message.text
     
     # Используем ID чата для отправки ответа
@@ -968,8 +1088,9 @@ async def handle_message(message: Message) -> None:
     await storage.add_message(user_id, "user", user_message)
     await storage.set_chat_id(user_id, chat_id)
     
-    # Индикатор печати
+    # Индикатор печати + подсказка ожидания
     await bot.send_chat_action(chat_id=chat_id, action="typing")
+    hint_msg = await message.answer(WAIT_HINT_SHORT)
     
     # Получаем историю сообщений пользователя
     message_history = await storage.get_message_history(user_id)
@@ -979,13 +1100,19 @@ async def handle_message(message: Message) -> None:
         response_text = await get_vibe_checker_response(message_history, user_id=user_id)
         
         # Отправляем ответ без добавления упоминания пользователя
-        await send_markdown_safe(chat_id, response_text)
+        try:
+            await send_markdown_safe(chat_id, response_text)
+        finally:
+            with contextlib.suppress(Exception):
+                await bot.delete_message(chat_id=chat_id, message_id=hint_msg.message_id)
         
         # Сохраняем ответ в историю
         await storage.add_message(user_id, "assistant", response_text)
         
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {str(e)}")
+        with contextlib.suppress(Exception):
+            await bot.delete_message(chat_id=chat_id, message_id=hint_msg.message_id)
         await message.answer("Произошла ошибка при обработке запроса. Пожалуйста, попробуйте еще раз.")
 
 
@@ -1002,7 +1129,7 @@ async def handle_voice_message(message: Message) -> None:
     chat_id = message.chat.id
     
     # Отправляем промежуточное сообщение
-    await message.answer("Обрабатываю голосовое сообщение...")
+    wait_msg = await message.answer(WAIT_HINT_VOICE)
     
     try:
         # Получаем голосовое сообщение
@@ -1035,13 +1162,19 @@ async def handle_voice_message(message: Message) -> None:
         response_text = await get_vibe_checker_response(message_history, user_id=user_id)
         
         # Отправляем ответ пользователю
-        await send_markdown_safe(chat_id, response_text)
+        try:
+            await send_markdown_safe(chat_id, response_text)
+        finally:
+            with contextlib.suppress(Exception):
+                await bot.delete_message(chat_id=chat_id, message_id=wait_msg.message_id)
         
         # Сохраняем ответ в историю
         await storage.add_message(user_id, "assistant", response_text)
         
     except Exception as e:
         logger.error(f"Ошибка при обработке голосового сообщения: {str(e)}")
+        with contextlib.suppress(Exception):
+            await bot.delete_message(chat_id=chat_id, message_id=wait_msg.message_id)
         await message.answer("Произошла ошибка при обработке голосового сообщения. Пожалуйста, попробуйте еще раз.")
 
 

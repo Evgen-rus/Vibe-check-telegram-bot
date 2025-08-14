@@ -6,7 +6,7 @@ from typing import List, Dict, Optional
 from datetime import datetime
 import pytz
 from openai import AsyncOpenAI
-from config import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_PARAMS, logger, INCLUDE_REMINDERS_IN_PROMPT
+from config import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_PARAMS, logger, INCLUDE_REMINDERS_IN_PROMPT, INCLUDE_PROFILE_IN_PROMPT
 from storage import storage
 from prompts import SYSTEM_PROMPT
 
@@ -160,6 +160,14 @@ async def get_vibe_checker_response(user_messages: List[Dict[str, str]], *, user
                 reminders_block = "\n\nАктивные напоминания пользователя (кратко):\n- " + "\n- ".join(lines)
         except Exception as exc:
             logger.warning(f"Не удалось собрать контекст напоминаний: {exc}")
+    profile_block = ""
+    if INCLUDE_PROFILE_IN_PROMPT and user_id is not None:
+        try:
+            profile_line = await storage.get_compact_profile_context(user_id)
+            if profile_line:
+                profile_block = "\n\nПрофиль пользователя (кратко): " + profile_line
+        except Exception as exc:
+            logger.warning(f"Не удалось собрать профиль пользователя: {exc}")
 
-    enhanced_system_prompt = f"{SYSTEM_PROMPT}\n\n{time_context}{reminders_block}"
+    enhanced_system_prompt = f"{SYSTEM_PROMPT}\n\n{time_context}{profile_block}{reminders_block}"
     return await generate_response(user_messages, enhanced_system_prompt)

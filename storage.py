@@ -37,6 +37,21 @@ class Storage:
             )
             await db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id INTEGER PRIMARY KEY,
+                    sex TEXT,
+                    age INTEGER,
+                    height_cm INTEGER,
+                    weight_kg REAL,
+                    activity TEXT,
+                    goal TEXT,
+                    allergies TEXT,
+                    diet TEXT
+                )
+                """
+            )
+            await db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
@@ -88,6 +103,7 @@ class Storage:
         await self._init_schema()
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (user_id,))
+            await db.execute("INSERT OR IGNORE INTO user_profiles(user_id) VALUES (?)", (user_id,))
             await db.commit()
 
     # ===== users/chat =====
@@ -107,6 +123,79 @@ class Storage:
             async with db.execute("SELECT chat_id FROM users WHERE user_id=?", (user_id,)) as cur:
                 row = await cur.fetchone()
                 return int(row[0]) if row and row[0] is not None else None
+
+    # ===== user profile =====
+    async def get_profile(self, user_id: int) -> Dict[str, Any]:
+        await self._ensure_user_row(user_id)
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT sex, age, height_cm, weight_kg, activity, goal, allergies, diet FROM user_profiles WHERE user_id=?",
+                (user_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        if not row:
+            return {
+                "sex": None,
+                "age": None,
+                "height_cm": None,
+                "weight_kg": None,
+                "activity": None,
+                "goal": None,
+                "allergies": None,
+                "diet": None,
+            }
+        return {
+            "sex": row[0],
+            "age": row[1],
+            "height_cm": row[2],
+            "weight_kg": row[3],
+            "activity": row[4],
+            "goal": row[5],
+            "allergies": row[6],
+            "diet": row[7],
+        }
+
+    async def set_profile_fields(self, user_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        await self._ensure_user_row(user_id)
+        allowed = {"sex", "age", "height_cm", "weight_kg", "activity", "goal", "allergies", "diet"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return
+        cols = ", ".join(f"{k}=?" for k in updates.keys())
+        params = list(updates.values()) + [user_id]
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(f"UPDATE user_profiles SET {cols} WHERE user_id=?", params)
+            await db.commit()
+
+    async def get_compact_profile_context(self, user_id: int) -> str:
+        prof = await self.get_profile(user_id)
+        parts: List[str] = []
+        sex_map = {"m": "мужчина", "f": "женщина"}
+        if prof.get("sex"):
+            parts.append(f"пол: {sex_map.get(prof['sex'], prof['sex'])}")
+        if prof.get("age") is not None:
+            parts.append(f"возраст: {int(prof['age'])} лет")
+        if prof.get("height_cm") is not None:
+            parts.append(f"рост: {int(prof['height_cm'])} см")
+        if prof.get("weight_kg") is not None:
+            try:
+                w = float(prof["weight_kg"])
+                parts.append(f"вес: {w:.1f} кг")
+            except Exception:
+                parts.append(f"вес: {prof['weight_kg']}")
+        if prof.get("activity"):
+            act_map = {"low": "низкая", "medium": "средняя", "high": "высокая"}
+            parts.append(f"активность: {act_map.get(prof['activity'], prof['activity'])}")
+        if prof.get("goal"):
+            goal_map = {"lose": "снижение веса", "maintain": "поддержание", "gain": "набор веса"}
+            parts.append(f"цель: {goal_map.get(prof['goal'], prof['goal'])}")
+        if prof.get("allergies"):
+            parts.append(f"аллергии: {prof['allergies']}")
+        if prof.get("diet"):
+            parts.append(f"диета/ограничения: {prof['diet']}")
+        return "; ".join(parts)
 
     # ===== messages/history =====
     async def add_message(self, user_id: int, role: str, content: str) -> None:

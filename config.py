@@ -41,6 +41,8 @@ OPENAI_PARAMS = {
 
 # Включать ли краткий контекст задач/напоминаний в промпт модели
 INCLUDE_REMINDERS_IN_PROMPT = True
+# Включать ли краткий профиль пользователя (пол, возраст, рост, вес, активность, цель и т.д.) в промпт модели
+INCLUDE_PROFILE_IN_PROMPT = True
 
 # Список разрешенных пользователей (Telegram User ID)
 ALLOWED_USERS = [
