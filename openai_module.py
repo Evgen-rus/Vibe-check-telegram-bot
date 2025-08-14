@@ -2,7 +2,7 @@
 Модуль для взаимодействия с OpenAI Responses API (асинхронно).
 """
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime
 import pytz
 from openai import AsyncOpenAI
@@ -61,8 +61,51 @@ def _messages_to_input_text(messages: List[Dict[str, str]]) -> str:
     return "\n\n".join(parts).strip()
 
 
+def _log_token_usage(response: Any, model_name: str, context: Optional[Dict[str, Any]] = None) -> None:
+    try:
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return
+        # Попытка извлечь популярные поля из usage
+        fields = [
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+        ]
+        usage_info: Dict[str, Any] = {}
+        for f in fields:
+            val = getattr(usage, f, None)
+            if isinstance(val, (int, float)):
+                usage_info[f] = int(val)
+        # Если ничего не извлекли, попробуем to_dict/model_dump
+        if not usage_info:
+            to_dict = getattr(usage, "model_dump", None) or getattr(usage, "to_dict", None)
+            if callable(to_dict):
+                try:
+                    dump = to_dict()
+                    if isinstance(dump, dict):
+                        for k in ("input_tokens", "output_tokens", "total_tokens", "prompt_tokens", "completion_tokens"):
+                            if k in dump and isinstance(dump[k], (int, float)):
+                                usage_info[k] = int(dump[k])
+                except Exception:
+                    pass
+        log_parts = [f"model={model_name}"]
+        if context:
+            ctx_str = ", ".join(f"{k}={v}" for k, v in context.items())
+            if ctx_str:
+                log_parts.append(ctx_str)
+        if usage_info:
+            usage_str = ", ".join(f"{k}={v}" for k, v in usage_info.items())
+            logger.info(f"OpenAI usage: {'; '.join(log_parts)}; {usage_str}")
+    except Exception as exc:
+        logger.debug(f"Не удалось залогировать токены: {exc}")
+
+
 async def generate_response(
-    messages: List[Dict[str, str]], system_prompt: Optional[str] = None
+    messages: List[Dict[str, str]], system_prompt: Optional[str] = None, *, log_context: Optional[Dict[str, Any]] = None
 ) -> str:
     """
     Генерирует ответ с использованием OpenAI Responses API.
@@ -113,6 +156,12 @@ async def generate_response(
                 response = await client.responses.create(**kwargs)
             else:
                 raise
+
+        # Логгируем использование токенов (в логи, не пользователю)
+        try:
+            _log_token_usage(response, str(kwargs.get("model", OPENAI_MODEL)), log_context)
+        except Exception:
+            pass
 
         # Предпочтительный способ получения текста
         text = getattr(response, "output_text", None)
@@ -170,4 +219,5 @@ async def get_vibe_checker_response(user_messages: List[Dict[str, str]], *, user
             logger.warning(f"Не удалось собрать профиль пользователя: {exc}")
 
     enhanced_system_prompt = f"{SYSTEM_PROMPT}\n\n{time_context}{profile_block}{reminders_block}"
-    return await generate_response(user_messages, enhanced_system_prompt)
+    log_ctx = {"user_id": user_id, "messages": len(user_messages) if user_messages else 0}
+    return await generate_response(user_messages, enhanced_system_prompt, log_context=log_ctx)
