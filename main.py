@@ -596,10 +596,18 @@ async def cmd_reminders(message: Message) -> None:
                 pass
         if r.get('snooze_until'):
             extra_parts.append(f"отложено до {r['snooze_until']}")
+        # Формат заголовка: периодические vs обычные
+        title = r.get('time') or ''
+        if r.get('period_minutes'):
+            per = int(r['period_minutes'])
+            wnd_start = r.get('window_start_hhmm')
+            wnd_end = r.get('window_end_hhmm')
+            wnd = f" {wnd_start}-{wnd_end}" if (wnd_start and wnd_end) else ""
+            title = f"каждые {per}мин{wnd}"
         extras = f" ({'; '.join(extra_parts)})" if extra_parts else ""
-        lines.append(f"{r['time']} — {r['text']}{extras}")
+        lines.append(f"{title} — {r['text']}{extras}")
         keyboard_rows.append([
-            InlineKeyboardButton(text=f"Удалить {r['time']} — {r['text']}", callback_data=f"delremind:{r['id']}")
+            InlineKeyboardButton(text=f"Удалить {title} — {r['text']}", callback_data=f"delremind:{r['id']}")
         ])
 
     kb = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)

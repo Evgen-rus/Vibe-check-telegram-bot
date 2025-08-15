@@ -352,7 +352,8 @@ class Storage:
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
                 """
-                SELECT id, time_hhmm, text, date_once, weekdays, weekday_only, weekend_only, snooze_until
+                SELECT id, time_hhmm, text, date_once, weekdays, weekday_only, weekend_only, snooze_until,
+                       period_minutes, window_start_hhmm, window_end_hhmm
                 FROM reminders
                 WHERE user_id=?
                 ORDER BY time_hhmm ASC, id ASC
@@ -371,6 +372,9 @@ class Storage:
                 "weekday_only": bool(r[5]) if r[5] is not None else False,
                 "weekend_only": bool(r[6]) if r[6] is not None else False,
                 "snooze_until": r[7],
+                "period_minutes": r[8],
+                "window_start_hhmm": r[9],
+                "window_end_hhmm": r[10],
             })
         return result
 
@@ -501,6 +505,7 @@ class Storage:
         lines: List[str] = []
         for r in items_sorted[:limit]:
             extras = []
+            # Метки расписания
             if r.get("date_once"):
                 extras.append(f"дата {r['date_once']}")
             if r.get("weekday_only"):
@@ -515,8 +520,18 @@ class Storage:
                         extras.append("дни: " + ",".join(items_days))
                 except Exception:
                     pass
+            # Форматирование заголовка
+            title: str
+            per = r.get("period_minutes")
+            if per:
+                wnd_start = r.get("window_start_hhmm")
+                wnd_end = r.get("window_end_hhmm")
+                wnd = f" {wnd_start}-{wnd_end}" if (wnd_start and wnd_end) else ""
+                title = f"каждые {int(per)}мин{wnd}"
+            else:
+                title = r.get("time") or ""
             extra_str = f" ({'; '.join(extras)})" if extras else ""
-            lines.append(f"{r['time']} — {r['text']}{extra_str}")
+            lines.append(f"{title} — {r['text']}{extra_str}")
         return lines
 
     async def mark_reminder_sent(self, user_id: int, reminder_id: int, today_date: str) -> None:
