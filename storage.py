@@ -209,7 +209,7 @@ class Storage:
             )
             await db.commit()
     
-    async def get_message_history(self, user_id: int, max_messages: int = 50) -> List[Dict[str, str]]:
+    async def get_message_history(self, user_id: int, max_messages: int = 20) -> List[Dict[str, str]]:
         """
         Получает историю сообщений пользователя.
         max_messages - количество сообщений в истории для модели.
