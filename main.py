@@ -1,5 +1,5 @@
 """
-Vibe Checker - персональный помощник по питанию.
+Люма AI - персональный помощник по питанию.
 Использует OpenAI API для понимания естественной речи и поддерживает голосовые сообщения.
 
 Usage:
@@ -15,7 +15,7 @@ from aiogram.filters import Command, BaseFilter
 from aiogram.types import Message, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
 
-from config import TELEGRAM_BOT_TOKEN, logger, ALLOWED_USERS, LOCAL_TZ
+from config import TELEGRAM_BOT_TOKEN, logger, ALLOWED_USERS, LOCAL_TZ, MOSCOW_TZ, MOSCOW_USERS, get_user_tz
 from openai_module import get_vibe_checker_response
 from storage import storage
 from prompts import WELCOME_MESSAGE, HELP_MESSAGE
@@ -689,7 +689,7 @@ async def cb_snooze(callback: CallbackQuery) -> None:
         await callback.answer("Некорректные параметры", show_alert=True)
         return
 
-    now_local = datetime.now(LOCAL_TZ)
+    now_local = datetime.now(get_user_tz(user_id))
     snooze_until = now_local + timedelta(minutes=minutes)
     snooze_iso = snooze_until.strftime("%Y-%m-%d %H:%M")
     await storage.set_reminder_snooze(user_id, rid, snooze_iso)
@@ -760,7 +760,7 @@ async def cb_r_date(callback: CallbackQuery) -> None:
     st = _wizard_get(user_id) or _wizard_init(user_id)
     _wizard_touch(st)
     what = callback.data.split(":", 2)[2]
-    now = datetime.now(LOCAL_TZ)
+    now = datetime.now(get_user_tz(user_id))
     if what == "today":
         st["date_once"] = now.strftime("%Y-%m-%d")
         await callback.message.edit_text("Выбери час:", reply_markup=_kb_hours())
@@ -967,7 +967,7 @@ async def cmd_snooze(message: Message) -> None:
     except Exception:
         await message.answer("Некорректные параметры. Пример: /snooze 5 10")
         return
-    now_local = datetime.now(LOCAL_TZ)
+    now_local = datetime.now(get_user_tz(user_id))
     snooze_until = now_local + timedelta(minutes=minutes)
     snooze_iso = snooze_until.strftime("%Y-%m-%d %H:%M")
     await storage.set_reminder_snooze(user_id, rid, snooze_iso)
@@ -1202,35 +1202,40 @@ async def main() -> None:
     async def reminders_loop():
         while True:
             try:
-                now_local = datetime.now(LOCAL_TZ)
-                hhmm = now_local.strftime("%H:%M")
-                today = now_local.strftime("%Y-%m-%d")
-                weekday_idx = int(now_local.strftime("%w")) - 1  # 0=пн .. 6=вс
-                if weekday_idx < 0:
-                    weekday_idx = 6
-                now_iso = now_local.strftime("%Y-%m-%d %H:%M")
+                # Два прохода: Новосибирск (по умолчанию) и Москва (для MOSCOW_USERS)
+                for pass_is_moscow in (False, True):
+                    tz = MOSCOW_TZ if pass_is_moscow else LOCAL_TZ
+                    now_local = datetime.now(tz)
+                    hhmm = now_local.strftime("%H:%M")
+                    today = now_local.strftime("%Y-%m-%d")
+                    weekday_idx = int(now_local.strftime("%w")) - 1  # 0=пн .. 6=вс
+                    if weekday_idx < 0:
+                        weekday_idx = 6
+                    now_iso = now_local.strftime("%Y-%m-%d %H:%M")
 
-                due = await storage.get_due_reminders(hhmm, today, weekday_idx, now_iso)
-                for user_id_int, reminder, is_snooze in due:
-                    chat_id_saved = await storage.get_chat_id(user_id_int)
-                    if chat_id_saved:
-                        try:
-                            # Инлайн-кнопка для отложить на 10 минут
-                            kb = InlineKeyboardMarkup(
-                                inline_keyboard=[
-                                    [InlineKeyboardButton(text="Отложить на 10 мин", callback_data=f"snooze:{reminder['id']}:10")]
-                                ]
-                            )
-                            await bot.send_message(chat_id_saved, f"⏰ Напоминание: {reminder['text']}", reply_markup=kb)
-                            if is_snooze:
-                                await storage.clear_snooze(user_id_int, int(reminder['id']))
-                            else:
-                                await storage.mark_reminder_sent(user_id_int, int(reminder['id']), today)
-                            # Если напоминание периодическое — двигаем next_fire_at
-                            if reminder.get('periodic') is True:
-                                await storage.bump_periodic_next_fire(user_id_int, int(reminder['id']), now_iso)
-                        except Exception as send_err:
-                            logger.error(f"Не удалось отправить напоминание {reminder}: {send_err}")
+                    due = await storage.get_due_reminders(hhmm, today, weekday_idx, now_iso)
+                    for user_id_int, reminder, is_snooze in due:
+                        # Оставляем только пользователей соответствующего TZ-прохода
+                        user_is_moscow = user_id_int in MOSCOW_USERS
+                        if user_is_moscow != pass_is_moscow:
+                            continue
+                        chat_id_saved = await storage.get_chat_id(user_id_int)
+                        if chat_id_saved:
+                            try:
+                                kb = InlineKeyboardMarkup(
+                                    inline_keyboard=[
+                                        [InlineKeyboardButton(text="Отложить на 10 мин", callback_data=f"snooze:{reminder['id']}:10")]
+                                    ]
+                                )
+                                await bot.send_message(chat_id_saved, f"⏰ Напоминание: {reminder['text']}", reply_markup=kb)
+                                if is_snooze:
+                                    await storage.clear_snooze(user_id_int, int(reminder['id']))
+                                else:
+                                    await storage.mark_reminder_sent(user_id_int, int(reminder['id']), today)
+                                if reminder.get('periodic') is True:
+                                    await storage.bump_periodic_next_fire(user_id_int, int(reminder['id']), now_iso)
+                            except Exception as send_err:
+                                logger.error(f"Не удалось отправить напоминание {reminder}: {send_err}")
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
                 logger.info("Цикл напоминаний отменён, выходим...")

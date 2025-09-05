@@ -7,7 +7,7 @@ import aiosqlite
 import time
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
-from config import logger, ENABLE_MESSAGE_HISTORY, LOCAL_TZ
+from config import logger, ENABLE_MESSAGE_HISTORY, LOCAL_TZ, MOSCOW_USERS, get_user_tz
 
 
 DATA_DIR = "data"
@@ -266,7 +266,7 @@ class Storage:
         # Рассчитываем next_fire_at для периодических напоминаний
         next_fire_at: Optional[str] = None
         if isinstance(period_minutes, int) and period_minutes > 0:
-            now_local = datetime.now(LOCAL_TZ)
+            now_local = datetime.now(get_user_tz(user_id))
             fire = now_local + timedelta(minutes=int(period_minutes))
 
             def is_day_allowed(dt):
@@ -578,7 +578,7 @@ class Storage:
             if not per_min:
                 return
             base = datetime.strptime(now_iso, "%Y-%m-%d %H:%M")
-            base = LOCAL_TZ.localize(base)
+            base = get_user_tz(user_id).localize(base)
             fire = base + timedelta(minutes=int(per_min))
 
             def is_day_allowed(dt: datetime) -> bool:

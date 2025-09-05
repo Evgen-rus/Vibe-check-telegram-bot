@@ -6,7 +6,7 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime
 import pytz
 from openai import AsyncOpenAI
-from config import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_PARAMS, logger, INCLUDE_REMINDERS_IN_PROMPT, INCLUDE_PROFILE_IN_PROMPT
+from config import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_PARAMS, logger, INCLUDE_REMINDERS_IN_PROMPT, INCLUDE_PROFILE_IN_PROMPT, get_user_tz, MOSCOW_USERS
 from storage import storage
 from prompts import SYSTEM_PROMPT
 
@@ -14,18 +14,19 @@ from prompts import SYSTEM_PROMPT
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
-def get_novosibirsk_time() -> str:
+def get_time_for_user(user_id: Optional[int]) -> str:
     """
-    Получает текущее время в Новосибирске (UTC+7).
+    Получает локальное время пользователя для системного контекста.
 
     Returns:
         Строка с текущим временем в формате для AI
     """
-    novosibirsk_tz = pytz.timezone("Asia/Novosibirsk")
-    current_time = datetime.now(novosibirsk_tz)
+    tz = get_user_tz(int(user_id)) if user_id is not None else pytz.timezone("Asia/Novosibirsk")
+    current_time = datetime.now(tz)
 
+    city_label = "Москва" if (user_id is not None and int(user_id) in MOSCOW_USERS) else "Новосибирск"
     formatted_time = current_time.strftime(
-        "Текущее время: %d.%m.%Y, %H:%M, %A, Новосибирск"
+        f"Текущее время: %d.%m.%Y, %H:%M, %A, {city_label}"
     )
 
     days_translation = {
@@ -200,7 +201,7 @@ async def get_vibe_checker_response(user_messages: List[Dict[str, str]], *, user
     Returns:
         Строка с ответом Vibe Checker
     """
-    time_context = get_novosibirsk_time()
+    time_context = get_time_for_user(user_id)
     reminders_block = ""
     if INCLUDE_REMINDERS_IN_PROMPT and user_id is not None:
         try:

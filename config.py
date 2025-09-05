@@ -23,9 +23,11 @@ LOGGING_LEVEL = "INFO"
 # False — история не накапливается, контекст для модели минимальный.
 ENABLE_MESSAGE_HISTORY = True
 
-# Часовой пояс по умолчанию для напоминаний
+# Часовые пояса
+# По умолчанию — Новосибирск; дополнительно поддерживаем Москву для выбранных пользователей
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Novosibirsk")
 LOCAL_TZ = pytz.timezone(TIMEZONE)
+MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 
 # Настройка логгера: ротация файлов и вывод в консоль
 LOG_LEVEL = getattr(logging, LOGGING_LEVEL, logging.INFO)
@@ -74,3 +76,15 @@ ALLOWED_USERS = [
     484231158,  # ID Дарья
     7226852921,  # ID М
 ]
+
+# Пользователи, для которых использовать московский часовой пояс
+MOSCOW_USERS = [
+    847720042,    # ID Татьяна Прокофьева
+]
+
+def get_user_tz(user_id: int):
+    """
+    Возвращает объект часового пояса для пользователя.
+    По умолчанию — LOCAL_TZ (Новосибирск), для MOSCOW_USERS — московское время.
+    """
+    return MOSCOW_TZ if int(user_id) in MOSCOW_USERS else LOCAL_TZ
