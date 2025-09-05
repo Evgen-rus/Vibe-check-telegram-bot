@@ -970,7 +970,7 @@ async def cmd_snooze(message: Message) -> None:
     now_local = datetime.now(LOCAL_TZ)
     snooze_until = now_local + timedelta(minutes=minutes)
     snooze_iso = snooze_until.strftime("%Y-%m-%d %H:%M")
-    storage.set_reminder_snooze(user_id, rid, snooze_iso)
+    await storage.set_reminder_snooze(user_id, rid, snooze_iso)
     await message.answer(f"Напоминание [{rid}] отложено на {minutes} минут")
 
 

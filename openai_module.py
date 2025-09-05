@@ -148,7 +148,7 @@ async def generate_response(
             if any(substr in msg.lower() for substr in [
                 "invalid model", "invalid model id", "model_not_found", "unknown model"
             ]):
-                fallback_model = "gpt-4o-mini"
+                fallback_model = "gpt-4.1-mini"
                 logger.warning(
                     f"Модель {OPENAI_MODEL} недоступна или неверна. Пробую запасную модель: {fallback_model}"
                 )
