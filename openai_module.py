@@ -4,6 +4,7 @@
 
 from typing import List, Dict, Optional, Any
 from datetime import datetime
+import json
 import pytz
 from openai import AsyncOpenAI
 from config import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_PARAMS, logger, INCLUDE_REMINDERS_IN_PROMPT, INCLUDE_PROFILE_IN_PROMPT, get_user_tz, MOSCOW_USERS
@@ -222,3 +223,97 @@ async def get_vibe_checker_response(user_messages: List[Dict[str, str]], *, user
     enhanced_system_prompt = f"{SYSTEM_PROMPT}\n\n{time_context}{profile_block}{reminders_block}"
     log_ctx = {"user_id": user_id, "messages": len(user_messages) if user_messages else 0}
     return await generate_response(user_messages, enhanced_system_prompt, log_context=log_ctx)
+
+
+# === Tools / Function Calling: авто-сохранение профиля ===
+PROFILE_SAVE_TOOL = [
+    {
+        "type": "function",
+        "name": "save_profile_fields",
+        "description": (
+            "Сохранить (частично обновить) профиль пользователя. "
+            "Передавай ТОЛЬКО те поля, которые пользователь явно назвал или подтвердил. "
+            "Поля: sex ('m'/'f'), age (int), height_cm (int), weight_kg (float/int), "
+            "activity ('low'|'medium'|'high'), goal ('lose'|'maintain'|'gain'), "
+            "allergies (string), diet (string)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sex":       {"type": "string", "enum": ["m", "f"]},
+                "age":       {"type": "integer"},
+                "height_cm": {"type": "integer"},
+                "weight_kg": {"type": "number"},
+                "activity":  {"type": "string", "enum": ["low", "medium", "high"]},
+                "goal":      {"type": "string", "enum": ["lose", "maintain", "gain"]},
+                "allergies": {"type": "string"},
+                "diet":      {"type": "string"}
+            },
+            "additionalProperties": False
+        },
+    }
+]
+
+
+async def maybe_update_profile_from_text(text: str, user_id: int) -> dict:
+    """
+    Одноразовый вызов модели с tools: если в тексте есть НОВЫЕ данные профиля —
+    модель вызовет save_profile_fields с нужными аргументами. Мы их сохраним в БД.
+    Возвращает dict обновлённых полей (или пустой dict).
+    """
+    if not text or user_id is None:
+        return {}
+
+    instructions = (
+        "Ты — парсер профиля. Если пользователь назвал новые данные профиля "
+        "(sex, age, height_cm, weight_kg, activity, goal, allergies, diet), "
+        "ВЫЗОВИ функцию save_profile_fields, заполняя ТОЛЬКО явно подтверждённые поля. "
+        "Если новых данных нет — не вызывай функцию."
+    )
+
+    try:
+        resp = await client.responses.create(
+            model=OPENAI_MODEL,
+            instructions=instructions,
+            input=text,
+            tools=PROFILE_SAVE_TOOL,
+            tool_choice="auto",
+        )
+    except Exception as exc:
+        msg = str(exc)
+        logger.warning(f"Function-calling profile parse failed on model {OPENAI_MODEL}: {msg}")
+        fallback_model = "gpt-4.1-mini"
+        try:
+            resp = await client.responses.create(
+                model=fallback_model,
+                instructions=instructions,
+                input=text,
+                tools=PROFILE_SAVE_TOOL,
+                tool_choice="auto",
+            )
+            logger.info(f"Function-calling profile parse succeeded with fallback model {fallback_model}")
+        except Exception as exc2:
+            logger.error(f"Function-calling profile parse failed with fallback: {exc2}")
+            return {}
+
+    updated: Dict[str, Any] = {}
+    for item in getattr(resp, "output", []) or []:
+        t = getattr(item, "type", None)
+        if t in ("function_call", "tool_call"):
+            name = getattr(item, "name", "")
+            if name == "save_profile_fields":
+                args_raw = getattr(item, "arguments", "") or getattr(item, "input", "")
+                try:
+                    args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
+                except Exception:
+                    args = {}
+                if isinstance(args, dict) and args:
+                    await storage.set_profile_fields(user_id, **args)
+                    updated = args
+                    try:
+                        logger.info(f"Profile updated via tool-call for user_id={user_id}: {args}")
+                    except Exception:
+                        pass
+                break
+
+    return updated

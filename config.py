@@ -40,10 +40,10 @@ formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(messag
 root_logger = logging.getLogger()
 root_logger.setLevel(LOG_LEVEL)
 
-# Избегаем дублирующих хендлеров при повторном импортировании
+# Избегаем дублирующих хендлеров при повторном импортировании backupCount= это количество сохраненых файлов 0 значит без ограничений
 if not root_logger.handlers:
     file_handler = TimedRotatingFileHandler(
-        LOG_FILE, when="midnight", backupCount=0, encoding="utf-8"
+        LOG_FILE, when="midnight", backupCount=90, encoding="utf-8"
     )
     file_handler.setLevel(LOG_LEVEL)
     file_handler.setFormatter(formatter)
@@ -59,7 +59,7 @@ logger = logging.getLogger("vibe_checker")
 
 # Параметры запросов к OpenAI
 OPENAI_PARAMS = {
-    "temperature": 0.7,
+    "temperature": 0.7, # не применяется в Responses API для GPT-5 mini
     "max_tokens": 5000,
 }
 

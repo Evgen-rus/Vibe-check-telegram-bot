@@ -16,7 +16,7 @@ from aiogram.types import Message, BotCommand, InlineKeyboardMarkup, InlineKeybo
 from aiogram.exceptions import TelegramBadRequest
 
 from config import TELEGRAM_BOT_TOKEN, logger, ALLOWED_USERS, LOCAL_TZ, MOSCOW_TZ, MOSCOW_USERS, get_user_tz
-from openai_module import get_vibe_checker_response
+from openai_module import get_vibe_checker_response, maybe_update_profile_from_text
 from storage import storage
 from prompts import WELCOME_MESSAGE, HELP_MESSAGE
 from prompts import WAIT_HINT_SHORT, WAIT_HINT_VOICE
@@ -1100,6 +1100,17 @@ async def handle_message(message: Message) -> None:
     await bot.send_chat_action(chat_id=chat_id, action="typing")
     hint_msg = await message.answer(WAIT_HINT_SHORT)
     
+    # Одноразовый парсер профиля через function calling (обновит БД при необходимости)
+    try:
+        updated = await maybe_update_profile_from_text(user_message, user_id)
+        if isinstance(updated, dict) and updated:
+            try:
+                await message.answer("✅ Профиль обновлён, в течении минуты отвечу")
+            except Exception:
+                pass
+    except Exception:
+        pass
+    
     # Получаем историю сообщений пользователя
     message_history = await storage.get_message_history(user_id)
     
@@ -1162,6 +1173,17 @@ async def handle_voice_message(message: Message) -> None:
         
         # Индикатор печати
         await bot.send_chat_action(chat_id=chat_id, action="typing")
+        
+        # Одноразовый парсер профиля через function calling для транскрипта
+        try:
+            updated = await maybe_update_profile_from_text(voice_text, user_id)
+            if isinstance(updated, dict) and updated:
+                try:
+                    await message.answer("✅ Профиль обновлён, в течении минуты отвечу")
+                except Exception:
+                    pass
+        except Exception:
+            pass
         
         # Получаем историю сообщений пользователя
         message_history = await storage.get_message_history(user_id)
