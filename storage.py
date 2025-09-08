@@ -161,6 +161,11 @@ class Storage:
         await self._ensure_user_row(user_id)
         allowed = {"sex", "age", "height_cm", "weight_kg", "activity", "goal", "allergies", "diet"}
         updates = {k: v for k, v in fields.items() if k in allowed}
+        # Страховка: игнорируем None и пустые строки, чтобы не затирать существующее
+        updates = {
+            k: v for k, v in updates.items()
+            if v is not None and (not isinstance(v, str) or v.strip() != "")
+        }
         if not updates:
             return
         cols = ", ".join(f"{k}=?" for k in updates.keys())

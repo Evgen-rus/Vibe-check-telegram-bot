@@ -237,18 +237,29 @@ PROFILE_SAVE_TOOL = [
             "activity ('low'|'medium'|'high'), goal ('lose'|'maintain'|'gain'), "
             "allergies (string), diet (string)."
         ),
+        "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
-                "sex":       {"type": "string", "enum": ["m", "f"]},
-                "age":       {"type": "integer"},
-                "height_cm": {"type": "integer"},
-                "weight_kg": {"type": "number"},
-                "activity":  {"type": "string", "enum": ["low", "medium", "high"]},
-                "goal":      {"type": "string", "enum": ["lose", "maintain", "gain"]},
-                "allergies": {"type": "string"},
-                "diet":      {"type": "string"}
+                "sex":       {"type": ["string", "null"], "enum": ["m", "f"]},
+                "age":       {"type": ["integer", "null"]},
+                "height_cm": {"type": ["integer", "null"]},
+                "weight_kg": {"type": ["number", "null"]},
+                "activity":  {"type": ["string", "null"], "enum": ["low", "medium", "high"]},
+                "goal":      {"type": ["string", "null"], "enum": ["lose", "maintain", "gain"]},
+                "allergies": {"type": ["string", "null"]},
+                "diet":      {"type": ["string", "null"]}
             },
+            "required": [
+                "sex",
+                "age",
+                "height_cm",
+                "weight_kg",
+                "activity",
+                "goal",
+                "allergies",
+                "diet"
+            ],
             "additionalProperties": False
         },
     }
@@ -268,8 +279,75 @@ async def maybe_update_profile_from_text(text: str, user_id: int) -> dict:
         "Ты — парсер профиля. Если пользователь назвал новые данные профиля "
         "(sex, age, height_cm, weight_kg, activity, goal, allergies, diet), "
         "ВЫЗОВИ функцию save_profile_fields, заполняя ТОЛЬКО явно подтверждённые поля. "
-        "Если новых данных нет — не вызывай функцию."
+        "Передавай ТОЛЬКО те ключи, которые присутствуют в текущем сообщении пользователя; "
+        "не перечисленные поля не передавай (или ставь null). Не придумывай значения и не переноси прошлые. "
+        "Если новых данных нет — не вызывай функцию. "
+        "Твой ответ должен быть коротким, поэтому не используй никаких слов, кроме значений полей."
     )
+
+    async def _sanitize_profile_updates(args: Dict[str, Any], uid: int) -> Dict[str, Any]:
+        allowed = {"sex", "age", "height_cm", "weight_kg", "activity", "goal", "allergies", "diet"}
+        incoming = {k: v for k, v in (args or {}).items() if k in allowed}
+
+        # Текущий профиль для сравнения
+        current = await storage.get_profile(uid)
+        applied: Dict[str, Any] = {}
+
+        enum_values = {
+            "sex": {"m", "f"},
+            "activity": {"low", "medium", "high"},
+            "goal": {"lose", "maintain", "gain"},
+        }
+
+        for key, val in incoming.items():
+            # Пропускаем None/пустые строки
+            if val is None:
+                continue
+            if isinstance(val, str) and not val.strip():
+                continue
+
+            # Enums
+            if key in enum_values:
+                s = str(val).lower()
+                if s not in enum_values[key]:
+                    continue
+                if isinstance(current.get(key), str) and str(current.get(key)).lower() == s:
+                    continue
+                applied[key] = s
+                continue
+
+            # Целочисленные поля
+            if key in {"age", "height_cm"}:
+                try:
+                    num = int(val)
+                except Exception:
+                    continue
+                if current.get(key) is not None and int(current.get(key)) == num:
+                    continue
+                applied[key] = num
+                continue
+
+            # Вещественные
+            if key == "weight_kg":
+                try:
+                    numf = float(val)
+                except Exception:
+                    continue
+                try:
+                    oldf = float(current.get(key)) if current.get(key) is not None else None
+                except Exception:
+                    oldf = None
+                if oldf is not None and abs(oldf - numf) < 1e-6:
+                    continue
+                applied[key] = numf
+                continue
+
+            # Прочие строки (allergies, diet)
+            if current.get(key) == val:
+                continue
+            applied[key] = val
+
+        return applied
 
     try:
         resp = await client.responses.create(
@@ -308,10 +386,12 @@ async def maybe_update_profile_from_text(text: str, user_id: int) -> dict:
                 except Exception:
                     args = {}
                 if isinstance(args, dict) and args:
-                    await storage.set_profile_fields(user_id, **args)
-                    updated = args
+                    updates = await _sanitize_profile_updates(args, user_id)
+                    if updates:
+                        await storage.set_profile_fields(user_id, **updates)
+                        updated = updates
                     try:
-                        logger.info(f"Profile updated via tool-call for user_id={user_id}: {args}")
+                        logger.info(f"Profile updated via tool-call for user_id={user_id}: {updated}")
                     except Exception:
                         pass
                 break
