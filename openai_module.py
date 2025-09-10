@@ -233,20 +233,19 @@ PROFILE_SAVE_TOOL = [
         "description": (
             "Сохранить (частично обновить) профиль пользователя. "
             "Передавай ТОЛЬКО те поля, которые пользователь явно назвал или подтвердил. "
-            "Поля: sex ('m'/'f'), age (int), height_cm (int), weight_kg (float/int), "
-            "activity ('low'|'medium'|'high'), goal ('lose'|'maintain'|'gain'), "
-            "allergies (string), diet (string)."
+            "Поля про которых в сообщении пользователя не сказанно ставь null."
+            "Поля: sex, age, height_cm, weight_kg, activity, goal, allergies, diet."
         ),
         "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
-                "sex":       {"type": ["string", "null"], "enum": ["m", "f"]},
+                "sex":       {"type": ["string", "null"]},
                 "age":       {"type": ["integer", "null"]},
                 "height_cm": {"type": ["integer", "null"]},
                 "weight_kg": {"type": ["number", "null"]},
-                "activity":  {"type": ["string", "null"], "enum": ["low", "medium", "high"]},
-                "goal":      {"type": ["string", "null"], "enum": ["lose", "maintain", "gain"]},
+                "activity":  {"type": ["string", "null"]},
+                "goal":      {"type": ["string", "null"]},
                 "allergies": {"type": ["string", "null"]},
                 "diet":      {"type": ["string", "null"]}
             },
